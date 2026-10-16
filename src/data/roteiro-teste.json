@@ -1,0 +1,119 @@
+{
+  "id": "script-jornal-noite-2026-10-15",
+  "title": "Jornal da Noite — Roteiro de teste",
+  "programName": "Jornal da Noite",
+  "editionDate": "2026-10-15",
+  "status": "ready",
+  "source": "mock",
+  "stories": [
+    {
+      "id": "story-falecimento-001",
+      "slug": "homenagem-escritor",
+      "headline": "Ariano Suassuna: trajetória e legado",
+      "summary": "Matéria fictícia de teste sobre a trajetória de um escritor e sua contribuição cultural.",
+      "category": "falecimento",
+      "tone": "solene",
+      "presenterGuidance": "Tom sóbrio e respeitoso. Evitar uma apresentação excessivamente alegre.",
+      "order": 1,
+      "pages": [
+        {
+          "id": "page-001-01",
+          "pageNumber": 1,
+          "title": "Abertura da matéria",
+          "text": "A cultura brasileira relembra hoje a trajetória e o legado de um dos nomes marcantes da literatura nacional.",
+          "estimatedDurationSeconds": 15,
+          "keywords": [
+            "cultura",
+            "literatura",
+            "legado"
+          ]
+        },
+        {
+          "id": "page-001-02",
+          "pageNumber": 2,
+          "title": "Trajetória e contribuição",
+          "text": "Sua obra aproximou diferentes gerações do teatro, da literatura e das expressões populares brasileiras.",
+          "estimatedDurationSeconds": 18,
+          "keywords": [
+            "obra",
+            "teatro",
+            "literatura"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "story-transporte-002",
+      "slug": "nova-linha-onibus",
+      "headline": "Nova linha de ônibus ligará bairros ao centro",
+      "summary": "Exemplo de matéria sobre transporte público e mudanças na mobilidade urbana.",
+      "category": "cidade",
+      "tone": "informativo",
+      "presenterGuidance": "Tom claro e informativo. Destacar o serviço oferecido à população.",
+      "order": 2,
+      "pages": [
+        {
+          "id": "page-002-01",
+          "pageNumber": 1,
+          "title": "Anúncio da nova linha",
+          "text": "Uma nova linha de ônibus vai ligar bairros da zona norte ao centro da cidade a partir da próxima segunda-feira.",
+          "estimatedDurationSeconds": 16,
+          "keywords": [
+            "ônibus",
+            "transporte",
+            "zona norte",
+            "centro"
+          ]
+        },
+        {
+          "id": "page-002-02",
+          "pageNumber": 2,
+          "title": "Frequência e atendimento",
+          "text": "A previsão é que os veículos passem a cada quinze minutos nos horários de maior movimento.",
+          "estimatedDurationSeconds": 13,
+          "keywords": [
+            "frequência",
+            "passageiros",
+            "horários"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "story-weather-003",
+      "slug": "previsao-fim-de-semana",
+      "headline": "Previsão do tempo para o fim de semana",
+      "summary": "Exemplo de matéria meteorológica para testar outra categoria editorial.",
+      "category": "previsao-do-tempo",
+      "tone": "informativo",
+      "presenterGuidance": "Tom acessível e natural. Não exagerar a expressividade sem relação com a informação.",
+      "order": 3,
+      "pages": [
+        {
+          "id": "page-003-01",
+          "pageNumber": 1,
+          "title": "Condições previstas",
+          "text": "A previsão indica variação de nuvens e possibilidade de chuva em algumas regiões durante o fim de semana.",
+          "estimatedDurationSeconds": 14,
+          "keywords": [
+            "previsão",
+            "chuva",
+            "fim de semana"
+          ]
+        },
+        {
+          "id": "page-003-02",
+          "pageNumber": 2,
+          "title": "Orientação ao público",
+          "text": "A recomendação é acompanhar as atualizações meteorológicas antes de planejar atividades ao ar livre.",
+          "estimatedDurationSeconds": 12,
+          "keywords": [
+            "orientação",
+            "atualizações",
+            "tempo"
+          ]
+        }
+      ]
+    }
+  ]
+}

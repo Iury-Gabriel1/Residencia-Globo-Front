@@ -1,0 +1,101 @@
+[
+  {
+    "id": "s1",
+    "code": "A03",
+    "headline": "Nova linha de ônibus",
+    "category": "Cidade",
+    "tone": "Informativo",
+    "guidance": "Tom claro e informativo. Destacar o serviço oferecido à população.",
+    "pages": [
+      {
+        "id": "p1",
+        "title": "Anúncio da nova linha",
+        "label": "ROTEIRO INICIAL",
+        "text": "A prefeitura anunciou hoje uma nova linha de ônibus que vai ligar a zona norte ao centro.",
+        "secondary": "O serviço começa na próxima segunda-feira, com viagens a cada quinze minutos nos horários de pico.",
+        "keywords": [
+          "prefeitura",
+          "ônibus",
+          "zona norte",
+          "centro"
+        ]
+      },
+      {
+        "id": "p2",
+        "title": "Frequência e atendimento",
+        "label": "CONTINUAÇÃO",
+        "text": "A expectativa é atender oito mil passageiros por dia.",
+        "secondary": "A reportagem mostra o trajeto e os pontos de embarque da nova linha.",
+        "keywords": [
+          "passageiros",
+          "frequência",
+          "trajeto"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "s2",
+    "code": "A04",
+    "headline": "Previsão do tempo",
+    "category": "Previsão do tempo",
+    "tone": "Informativo",
+    "guidance": "Tom acessível e natural. Evitar exagerar a expressividade.",
+    "pages": [
+      {
+        "id": "p3",
+        "title": "Condições previstas",
+        "label": "ROTEIRO INICIAL",
+        "text": "A previsão indica variação de nuvens e possibilidade de chuva em algumas regiões durante o fim de semana.",
+        "secondary": "A recomendação é acompanhar as atualizações meteorológicas antes de planejar atividades ao ar livre.",
+        "keywords": [
+          "previsão",
+          "chuva",
+          "fim de semana"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "s3",
+    "code": "A05",
+    "headline": "Economia local",
+    "category": "Economia",
+    "tone": "Informativo",
+    "guidance": "Tom objetivo, com atenção aos números e seus impactos.",
+    "pages": [
+      {
+        "id": "p4",
+        "title": "Indicadores econômicos",
+        "label": "ROTEIRO INICIAL",
+        "text": "O comércio local registrou aumento no movimento durante o último mês, segundo levantamento divulgado nesta manhã.",
+        "secondary": "Especialistas destacam que os resultados variam conforme o setor e a região analisada.",
+        "keywords": [
+          "comércio",
+          "economia",
+          "indicadores"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "s4",
+    "code": "A06",
+    "headline": "Encerramento",
+    "category": "Cultura",
+    "tone": "Leve",
+    "guidance": "Tom natural e acolhedor para concluir o programa.",
+    "pages": [
+      {
+        "id": "p5",
+        "title": "Fim do programa",
+        "label": "ENCERRAMENTO",
+        "text": "Essas foram as principais notícias desta edição. Obrigado pela companhia e até o próximo encontro.",
+        "keywords": [
+          "encerramento",
+          "programa"
+        ]
+      }
+    ]
+  }
+]
