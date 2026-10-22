@@ -47,3 +47,61 @@ Na aba **Operação ao vivo**, o operador pode editar a chamada da matéria, esc
 A lista do espelho permite selecionar uma matéria manualmente; o seletor **Página atual** permite escolher uma página específica. Ao selecionar matéria ou página, a leitura é pausada para evitar saltos inesperados. Os botões Anterior, Próxima e Pausar/Retomar continuam disponíveis ao operador. Uma prévia da próxima matéria aparece no painel de classificação.
 
 A classificação, os indicadores de conexão e os dados de áudio são demonstrativos e locais; não há integração real com iNEWS, backend ou reconhecimento de voz nesta etapa.
+
+
+## Backend e comunicação em tempo real
+
+O backend está em `backend/` e usa Python, FastAPI e WebSocket para compartilhar a página atual, a matéria selecionada, pausa/retomada, velocidade, tamanho da fonte e classificação editorial entre operador e apresentador.
+
+### Iniciar o backend
+
+Requer Python 3.10 ou superior.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+No Windows PowerShell, ative o ambiente com `.venv\\Scripts\\Activate.ps1`.
+
+- Verificação de saúde: http://localhost:8000/api/health
+- Documentação da API: http://localhost:8000/docs
+- WebSocket: `ws://localhost:8000/ws/{session_id}`
+
+### Iniciar o frontend
+
+Crie um arquivo `.env.local` na raiz copiando `.env.example`. Para desenvolvimento no mesmo computador:
+
+```dotenv
+VITE_API_URL=http://localhost:8000
+VITE_WS_URL=ws://localhost:8000
+```
+
+Depois execute:
+
+```bash
+npm install
+npm run dev
+```
+
+Operador e apresentador devem usar o mesmo identificador de sessão na URL. Por padrão, a sessão é `demo`. Para separar sessões, acrescente o parâmetro `?session=jornal-noite` à URL em ambas as telas.
+
+### Testar em computadores diferentes na mesma rede
+
+1. Inicie o backend no computador servidor com `--host 0.0.0.0`.
+2. Descubra o endereço IP local do servidor (por exemplo, `192.168.1.20`).
+3. Configure no frontend `.env.local` com `VITE_API_URL=http://192.168.1.20:8000` e `VITE_WS_URL=ws://192.168.1.20:8000`.
+4. Inicie o frontend com `npm run dev -- --host 0.0.0.0`.
+5. Libere as portas 8000 e 5173 no firewall da rede, se necessário.
+6. Abra o endereço Vite do computador servidor nos dois computadores, usando a mesma sessão. Teste pausa, retomada, anterior, próxima e seleção manual.
+
+Não use `localhost` nas configurações de outro computador: ele apontaria para o próprio computador cliente. Em produção, configure HTTPS/WSS, autenticação e CORS com origens explícitas.
+
+### Escopo e limitações atuais
+
+- O backend mantém o estado em memória: ele é compartilhado entre clientes conectados ao mesmo processo, mas é perdido quando o servidor reinicia. Não use múltiplos workers sem trocar o armazenamento por Redis ou outro mecanismo compartilhado.
+- A reconexão tenta recuperar o estado atual da sessão.
+- A conexão real com iNEWS, o áudio, a transcrição e a IA para identificar mudanças de assunto continuam fora desta etapa.
+- A implementação de rede foi adicionada em uma branch de funcionalidade para revisão antes de integrar à branch principal.
