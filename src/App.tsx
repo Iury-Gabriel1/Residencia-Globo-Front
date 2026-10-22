@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import storyData from './data/stories.json'
 import type { Story } from './types/script'
+import { useTeleprompterSync, type SharedTeleprompterState } from './realtime/useTeleprompterSync'
 
 const initialStories = storyData as Story[]
 type Tab = 'Conexão iNEWS' | 'Operação ao vivo' | 'Improvisos' | 'Leitura ampliada' | 'Apresentador'
@@ -36,6 +37,27 @@ function App() {
   const [classificationSaved, setClassificationSaved] = useState(true)
   const [operatorOverride, setOperatorOverride] = useState(false)
   const presenterTextRef = useRef<HTMLDivElement>(null)
+  const sessionId = useMemo(() => new URLSearchParams(window.location.search).get('session') || 'demo', [])
+  const realtime = useTeleprompterSync({
+    sessionId,
+    state: { selectedStory, pageIndex, paused, speed, fontSize, editorialStories, operatorOverride },
+    onRemoteState: (remote: SharedTeleprompterState) => {
+      if (Array.isArray(remote.editorialStories) && remote.editorialStories.length > 0) {
+        setEditorialStories(remote.editorialStories as Story[])
+        const safeStoryIndex = Math.min(remote.selectedStory, remote.editorialStories.length - 1)
+        const remoteStory = remote.editorialStories[safeStoryIndex] as Story
+        setSelectedStory(safeStoryIndex)
+        setPageIndex(Math.min(remote.pageIndex, Math.max(0, remoteStory.pages.length - 1)))
+      } else {
+        setSelectedStory(remote.selectedStory)
+        setPageIndex(remote.pageIndex)
+      }
+      setPaused(remote.paused)
+      setSpeed(remote.speed)
+      setFontSize(remote.fontSize)
+      setOperatorOverride(remote.operatorOverride)
+    },
+  })
 
   useEffect(() => {
     try { localStorage.setItem('teleprompter-editorial-stories-v1', JSON.stringify(editorialStories)) } catch { /* classificação permanece nesta sessão */ }
@@ -93,21 +115,28 @@ function App() {
   function takeManualControl() {
     setOperatorOverride(true)
     setPaused(true)
+    realtime.sendCommand('take_control', { operatorOverride: true, paused: true })
   }
   function toggleReading() {
+    const nextPaused = !paused
     setOperatorOverride(true)
-    setPaused(value => !value)
+    setPaused(nextPaused)
+    realtime.sendCommand(nextPaused ? 'pause' : 'resume', { operatorOverride: true, paused: nextPaused })
   }
   function chooseStory(index: number) {
     if (!editorialStories[index]) return
     setSelectedStory(index)
     setPageIndex(0)
-    takeManualControl()
+    setOperatorOverride(true)
+    setPaused(true)
+    realtime.sendCommand('select_story', { selectedStory: index, pageIndex: 0, operatorOverride: true, paused: true })
   }
   function choosePage(index: number) {
     if (!story.pages[index]) return
     setPageIndex(index)
-    takeManualControl()
+    setOperatorOverride(true)
+    setPaused(true)
+    realtime.sendCommand('select_page', { selectedStory, pageIndex: index, operatorOverride: true, paused: true })
   }
   function updateCurrentStory(patch: Partial<Story>) {
     setEditorialStories(current => current.map((item, index) => index === selectedStory ? { ...item, ...patch } : item))
@@ -118,24 +147,35 @@ function App() {
     setClassificationSaved(true)
   }
   function previousPage() {
-    takeManualControl()
-    if (pageIndex > 0) setPageIndex(pageIndex - 1)
-    else if (selectedStory > 0) {
+    setOperatorOverride(true)
+    setPaused(true)
+    if (pageIndex > 0) {
+      setPageIndex(pageIndex - 1)
+      realtime.sendCommand('previous', { selectedStory, pageIndex: pageIndex - 1, paused: true, operatorOverride: true })
+    } else if (selectedStory > 0) {
       const previousStory = editorialStories[selectedStory - 1]
       if (previousStory.pages.length > 0) {
-        setSelectedStory(selectedStory - 1)
-        setPageIndex(previousStory.pages.length - 1)
+        const targetStory = selectedStory - 1
+        const targetPage = previousStory.pages.length - 1
+        setSelectedStory(targetStory)
+        setPageIndex(targetPage)
+        realtime.sendCommand('previous', { selectedStory: targetStory, pageIndex: targetPage, paused: true, operatorOverride: true })
       }
     }
   }
   function nextPage() {
-    takeManualControl()
-    if (pageIndex < story.pages.length - 1) setPageIndex(pageIndex + 1)
-    else if (selectedStory < editorialStories.length - 1) {
+    setOperatorOverride(true)
+    setPaused(true)
+    if (pageIndex < story.pages.length - 1) {
+      setPageIndex(pageIndex + 1)
+      realtime.sendCommand('next', { selectedStory, pageIndex: pageIndex + 1, paused: true, operatorOverride: true })
+    } else if (selectedStory < editorialStories.length - 1) {
       const followingStory = editorialStories[selectedStory + 1]
       if (followingStory.pages.length > 0) {
-        setSelectedStory(selectedStory + 1)
+        const targetStory = selectedStory + 1
+        setSelectedStory(targetStory)
         setPageIndex(0)
+        realtime.sendCommand('next', { selectedStory: targetStory, pageIndex: 0, paused: true, operatorOverride: true })
       }
     }
   }
@@ -143,7 +183,7 @@ function App() {
   return <div className="app">
     <header className="topbar">
       <div className="brand"><div className="brand-mark">T</div><div><strong>Teleprompter</strong><span>Console do operador</span></div></div>
-      <div className="top-meta"><span className="environment">AMBIENTE DE DEMONSTRAÇÃO</span><span className={`connection ${connected ? 'online' : ''}`}>● {connected ? 'iNEWS · conectado' : 'iNEWS · configuração'}</span><strong>19:07:12</strong><span className="avatar">MC</span></div>
+      <div className="top-meta"><span className="environment">SESSÃO {sessionId}</span><span className={`connection ${realtime.status === 'connected' ? 'online' : ''}`}>● {realtime.status === 'connected' ? 'Tempo real · conectado' : realtime.status === 'reconnecting' ? 'Reconectando…' : realtime.status === 'offline' ? 'Servidor indisponível' : 'Conectando…'}</span><span className={`connection ${connected ? 'online' : ''}`}>iNEWS · {connected ? 'simulado' : 'não conectado'}</span><span className="avatar">MC</span></div>
     </header>
 
     <nav className="tabs" aria-label="Navegação principal">
@@ -221,7 +261,7 @@ function App() {
     {tab === 'Apresentador' && <main className="presenter-mode" style={{ backgroundColor: preferences.highContrast ? '#000000' : preferences.backgroundColor, color: preferences.highContrast ? '#ffffff' : preferences.textColor, fontFamily: preferences.fontFamily }}>
       <header className="presenter-header">
         <div className="brand"><div className="brand-mark">T</div><div><strong>Teleprompter</strong><span>Modo do apresentador</span></div></div>
-        <div className="presenter-status"><span className="pill green">● {operatorOverride ? 'Controle manual' : 'Leitura local · sem IA'}</span><span>{story.code} · {story.headline}</span></div>
+        <div className="presenter-status"><span className={`pill ${realtime.status === 'connected' ? 'green' : 'yellow'}`}>● {realtime.status === 'connected' ? 'Sincronizado em tempo real' : realtime.status === 'reconnecting' ? 'Reconectando ao servidor' : realtime.status === 'offline' ? 'Servidor indisponível' : 'Conectando ao servidor'}</span><span>Sessão {sessionId} · {story.code} · {story.headline}</span></div>
         <div className="presenter-header-actions"><label className="presenter-story-picker">Matéria<select aria-label="Selecionar matéria do roteiro" value={selectedStory} onChange={e => chooseStory(Number(e.target.value))}>{editorialStories.map((item, index) => <option key={item.id} value={index}>{item.code} · {item.headline}</option>)}</select></label><button className="secondary" onClick={() => setShowReadingSettings(value => !value)} aria-expanded={showReadingSettings} aria-controls="reading-settings">{showReadingSettings ? 'Fechar personalização' : 'Personalizar leitura'}</button><button className="secondary manual-control-button" onClick={takeManualControl}>Assumir controle</button><button className="secondary" onClick={() => setTab('Operação ao vivo')}>Voltar ao operador</button></div>
       </header>
       {showReadingSettings && <section className="reading-settings" id="reading-settings" aria-labelledby="reading-settings-title">
@@ -265,10 +305,10 @@ function App() {
         <div className="presenter-adjustment font-adjustment"><label>Tamanho do texto <strong>{fontSize}px</strong></label><div className="font-buttons"><button className="secondary" onClick={() => setFontSize(Math.max(24, fontSize - 2))} aria-label="Diminuir tamanho do texto">A−</button><button className="secondary" onClick={() => setFontSize(Math.min(60, fontSize + 2))} aria-label="Aumentar tamanho do texto">A+</button></div></div>
       </section>
       {paused && <div className="presenter-paused" role="status">Leitura pausada. O texto permanece nesta página até a retomada.</div>}
-      <p className="presenter-hint">Leitura e navegação funcionam localmente, sem IA ou conexão externa. Atalhos: Espaço pausa/retoma · ← página anterior · → próxima página · +/− tamanho do texto · Esc fecha a personalização.</p>
+      <p className="presenter-hint">Estado sincronizado pelo servidor com as telas da mesma sessão. A IA de reconhecimento de fala ainda não está implementada. Atalhos: Espaço pausa/retoma · ← página anterior · → próxima página · +/− tamanho do texto · Esc fecha a personalização.</p>
     </main>}
 
-    {tab !== 'Apresentador' && <footer className="app-footer"><span>Protótipo estático · Estados de iNEWS e áudio são simulados</span><span>Operador: Mariana Costa · Estação OP-02</span></footer>}
+    {tab !== 'Apresentador' && <footer className="app-footer"><span>WebSocket: {realtime.status} · iNEWS e áudio continuam simulados</span><span>Operador: Mariana Costa · Estação OP-02</span></footer>}
     {showExpanded && <div className="modal-backdrop" role="presentation" onClick={()=>setShowExpanded(false)}><section className="modal panel" role="dialog" aria-modal="true" aria-label="Prévia de leitura ampliada" onClick={e=>e.stopPropagation()}><div className="panel-heading"><h2>Prévia da leitura ampliada</h2><button className="secondary" onClick={()=>setShowExpanded(false)}>Fechar ×</button></div><h3>{story.headline}</h3><p style={{fontSize:`${fontSize}px`,lineHeight:1.35}}>{page.text}</p><button className="primary" onClick={()=>{setTab('Leitura ampliada');setShowExpanded(false)}}>Abrir modo ampliado</button></section></div>}
   </div>
 }
