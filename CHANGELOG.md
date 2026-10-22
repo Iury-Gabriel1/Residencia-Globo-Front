@@ -15,4 +15,16 @@
 ### Observações
 
 - A integração real com iNEWS, a captura e transcrição de áudio, o backend e a sincronização entre dispositivos ainda não estão implementados; os dados correspondentes são demonstrativos.
-- Este registro descreve o estado atual do projeto, não uma lista de alterações recentes inferidas sem histórico. Na comparação com o Git, `package-lock.json` era o único arquivo novo relacionado ao código; `dist/` e `node_modules/` também aparecem como arquivos locais não rastreados, mas são artefatos/dependências gerados. Não havia alterações pendentes nos arquivos da aplicação.
+- Este registro descreve o estado do projeto em 2026-10-16. Na comparação com o Git, `package-lock.json` era o único arquivo novo relacionado ao código; `dist/` e `node_modules/` também aparecem como arquivos locais não rastreados, mas são artefatos/dependências gerados. Não havia alterações pendentes nos arquivos da aplicação.
+
+## 2026-10-22 · Arthur
+
+### Alterado
+
+- Inclusão e edição manual da chamada, categoria editorial, tom e nível de alerta de cada matéria, com classificação salva no navegador.
+- Exibição da chamada, categoria e tom antes do texto de leitura, com destaque visual para alertas editoriais importantes.
+- Prévia da próxima matéria com chamada, categoria, tom e trecho inicial, incluindo indicação de fim do espelho.
+- Prévia da matéria seguinte também disponível no modo do apresentador, com chamada, categoria, tom e trecho inicial.
+- Navegação manual e independente de IA, com seleção de matérias no modo do apresentador, sincronização da página, pausa/retomada e controles de avanço/retorno sem ultrapassar o roteiro.
+- Ação de assumir controle manual disponível durante a leitura; operações manuais pausam a rolagem e mantêm a posição atual.
+- Alterações realizadas somente no front-end.
