@@ -27,4 +27,8 @@
 - Prévia da matéria seguinte também disponível no modo do apresentador, com chamada, categoria, tom e trecho inicial.
 - Navegação manual e independente de IA, com seleção de matérias no modo do apresentador, sincronização da página, pausa/retomada e controles de avanço/retorno sem ultrapassar o roteiro.
 - Ação de assumir controle manual disponível durante a leitura; operações manuais pausam a rolagem e mantêm a posição atual.
+- Simplificação da hierarquia visual com monitor de voz, classificação editorial, ajustes e metadados de revisão recolhidos em seções expansíveis, sem remover informações ou ações.
+- Melhorias de legibilidade, foco, espaçamento e adaptação responsiva em telas menores.
+- Navegação móvel reorganizada para manter as áreas principais visíveis sem rolagem horizontal; estado atual da página identificado para tecnologias assistivas.
+- Filtro de improvisos agora corresponde ao registro exibido e apresenta orientação quando não há ocorrências para a matéria.
 - Alterações realizadas somente no front-end.
