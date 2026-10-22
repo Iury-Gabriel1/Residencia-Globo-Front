@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import storyData from './data/stories.json'
 import type { Story } from './types/script'
+import { useTeleprompterSync, type SharedTeleprompterState } from './realtime/useTeleprompterSync'
 
 const initialStories = storyData as Story[]
 type Tab = 'Conexão iNEWS' | 'Operação ao vivo' | 'Improvisos' | 'Leitura ampliada' | 'Apresentador'
@@ -36,6 +37,27 @@ function App() {
   const [classificationSaved, setClassificationSaved] = useState(true)
   const [operatorOverride, setOperatorOverride] = useState(false)
   const presenterTextRef = useRef<HTMLDivElement>(null)
+  const sessionId = useMemo(() => new URLSearchParams(window.location.search).get('session') || 'demo', [])
+  const realtime = useTeleprompterSync({
+    sessionId,
+    state: { selectedStory, pageIndex, paused, speed, fontSize, editorialStories, operatorOverride },
+    onRemoteState: (remote: SharedTeleprompterState) => {
+      if (Array.isArray(remote.editorialStories) && remote.editorialStories.length > 0) {
+        setEditorialStories(remote.editorialStories as Story[])
+        const safeStoryIndex = Math.min(remote.selectedStory, remote.editorialStories.length - 1)
+        const remoteStory = remote.editorialStories[safeStoryIndex] as Story
+        setSelectedStory(safeStoryIndex)
+        setPageIndex(Math.min(remote.pageIndex, Math.max(0, remoteStory.pages.length - 1)))
+      } else {
+        setSelectedStory(remote.selectedStory)
+        setPageIndex(remote.pageIndex)
+      }
+      setPaused(remote.paused)
+      setSpeed(remote.speed)
+      setFontSize(remote.fontSize)
+      setOperatorOverride(remote.operatorOverride)
+    },
+  })
 
   useEffect(() => {
     try { localStorage.setItem('teleprompter-editorial-stories-v1', JSON.stringify(editorialStories)) } catch { /* classificação permanece nesta sessão */ }
@@ -93,21 +115,28 @@ function App() {
   function takeManualControl() {
     setOperatorOverride(true)
     setPaused(true)
+    realtime.sendCommand('take_control', { operatorOverride: true, paused: true })
   }
   function toggleReading() {
+    const nextPaused = !paused
     setOperatorOverride(true)
-    setPaused(value => !value)
+    setPaused(nextPaused)
+    realtime.sendCommand(nextPaused ? 'pause' : 'resume', { operatorOverride: true, paused: nextPaused })
   }
   function chooseStory(index: number) {
     if (!editorialStories[index]) return
     setSelectedStory(index)
     setPageIndex(0)
-    takeManualControl()
+    setOperatorOverride(true)
+    setPaused(true)
+    realtime.sendCommand('select_story', { selectedStory: index, pageIndex: 0, operatorOverride: true, paused: true })
   }
   function choosePage(index: number) {
     if (!story.pages[index]) return
     setPageIndex(index)
-    takeManualControl()
+    setOperatorOverride(true)
+    setPaused(true)
+    realtime.sendCommand('select_page', { selectedStory, pageIndex: index, operatorOverride: true, paused: true })
   }
   function updateCurrentStory(patch: Partial<Story>) {
     setEditorialStories(current => current.map((item, index) => index === selectedStory ? { ...item, ...patch } : item))
