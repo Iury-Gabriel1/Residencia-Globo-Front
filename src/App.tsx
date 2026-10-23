@@ -1,12 +1,42 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import storyData from './data/stories.json'
-import type { Story } from './types/script'
+import type { RealtimeState, Story } from './types/script'
 
 const initialStories = storyData as Story[]
 type Tab = 'Conexão iNEWS' | 'Operação ao vivo' | 'Improvisos' | 'Leitura ampliada' | 'Apresentador'
 type ReadingPreferences = { fontFamily: string; backgroundColor: string; textColor: string; highContrast: boolean }
 const DEFAULT_PREFERENCES: ReadingPreferences = { fontFamily: 'Arial, Helvetica, sans-serif', backgroundColor: '#0d1322', textColor: '#f4f6fd', highContrast: false }
 const PREFERENCES_KEY = 'teleprompter-reading-preferences-v1'
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const SESSION_ID = new URLSearchParams(window.location.search).get('session') || 'demo'
+const categories: Story['category'][] = ['Cidade', 'Previsão do tempo', 'Economia', 'Política', 'Cultura', 'Notícia séria', 'Falecimento', 'Conteúdo leve']
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function parseRundownJson(value: unknown): Story[] {
+  const stories = Array.isArray(value) ? value : isRecord(value) ? value.stories : undefined
+  if (!Array.isArray(stories) || stories.length === 0) throw new Error('O arquivo precisa conter uma lista não vazia de matérias.')
+  for (const [storyIndex, item] of stories.entries()) {
+    if (!isRecord(item) || !['id', 'code', 'headline', 'category', 'tone'].every(key => typeof item[key] === 'string')) {
+      throw new Error(`Matéria ${storyIndex + 1}: campos id, code, headline, category e tone são obrigatórios.`)
+    }
+    if (!categories.includes(item.category as Story['category']) || typeof item.guidance !== 'string') {
+      throw new Error(`Matéria ${storyIndex + 1}: categoria ou orientação inválida.`)
+    }
+    if (!Array.isArray(item.pages) || item.pages.length === 0) throw new Error(`Matéria ${storyIndex + 1}: inclua ao menos uma página.`)
+    for (const [pageIndex, page] of item.pages.entries()) {
+      if (!isRecord(page) || !['id', 'title', 'label', 'text'].every(key => typeof page[key] === 'string') ||
+          !Array.isArray(page.keywords) || !page.keywords.every(keyword => typeof keyword === 'string') ||
+          (page.secondary !== undefined && typeof page.secondary !== 'string')) {
+        throw new Error(`Matéria ${storyIndex + 1}, página ${pageIndex + 1}: dados incompletos ou inválidos.`)
+      }
+    }
+  }
+  return stories as Story[]
+}
+
 function contrastRatio(foreground: string, background: string) {
   const luminance = (hex: string) => {
     const value = hex.replace('#', '')
@@ -24,11 +54,15 @@ function App() {
   const [selectedStory, setSelectedStory] = useState(0)
   const [pageIndex, setPageIndex] = useState(0)
   const [paused, setPaused] = useState(false)
+  const [importStories, setImportStories] = useState<Story[] | null>(null)
+  const [importFileName, setImportFileName] = useState('')
+  const [importStatus, setImportStatus] = useState('')
+  const [importing, setImporting] = useState(false)
   const [speed, setSpeed] = useState(() => { try { const saved = localStorage.getItem(PREFERENCES_KEY); return saved ? Number(JSON.parse(saved).speed) || 1 : 1 } catch { return 1 } })
   const [fontSize, setFontSize] = useState(() => { try { const saved = localStorage.getItem(PREFERENCES_KEY); return saved ? Number(JSON.parse(saved).fontSize) || 36 : 36 } catch { return 36 } })
   const [preferences, setPreferences] = useState<ReadingPreferences>(() => { try { const saved = localStorage.getItem(PREFERENCES_KEY); if (saved) { const parsed = JSON.parse(saved); return { ...DEFAULT_PREFERENCES, ...parsed.preferences } } } catch { /* usa os padrões */ } return DEFAULT_PREFERENCES })
   const [showReadingSettings, setShowReadingSettings] = useState(false)
-  const [connected, setConnected] = useState(false)
+  const [backendStatus, setBackendStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [reviewed, setReviewed] = useState(false)
   const [operatorNote, setOperatorNote] = useState('Comentário espontâneo sobre a espera dos passageiros. Mantive o ponto de leitura e retomei na linha 05 após o fim da fala. Sem alteração do roteiro original.')
   const [showExpanded, setShowExpanded] = useState(false)
@@ -36,6 +70,124 @@ function App() {
   const [classificationSaved, setClassificationSaved] = useState(true)
   const [operatorOverride, setOperatorOverride] = useState(false)
   const presenterTextRef = useRef<HTMLDivElement>(null)
+  const socketRef = useRef<WebSocket | null>(null)
+  const remoteStateRef = useRef<string | null>(null)
+  const latestStateRef = useRef<RealtimeState>({
+    selectedStory,
+    pageIndex,
+    paused,
+    speed,
+    fontSize,
+    editorialStories,
+    operatorOverride,
+    readingPreferences: preferences
+  })
+
+  function applyRemoteState(state: RealtimeState) {
+    if (!Array.isArray(state.editorialStories) || state.editorialStories.length === 0) {
+      console.error('O backend enviou um espelho vazio ou inválido.')
+      return
+    }
+    const safeStoryIndex = Math.min(Math.max(state.selectedStory, 0), state.editorialStories.length - 1)
+    const storyPages = state.editorialStories[safeStoryIndex]?.pages ?? []
+    const safePageIndex = storyPages.length
+      ? Math.min(Math.max(state.pageIndex, 0), storyPages.length - 1)
+      : 0
+    const normalizedState = { ...state, selectedStory: safeStoryIndex, pageIndex: safePageIndex }
+    remoteStateRef.current = JSON.stringify(normalizedState)
+    setEditorialStories(normalizedState.editorialStories)
+    setSelectedStory(safeStoryIndex)
+    setPageIndex(safePageIndex)
+    setPaused(normalizedState.paused)
+    setSpeed(normalizedState.speed)
+    setFontSize(normalizedState.fontSize)
+    setOperatorOverride(normalizedState.operatorOverride)
+    setPreferences({ ...DEFAULT_PREFERENCES, ...normalizedState.readingPreferences })
+    setClassificationSaved(true)
+  }
+
+  function sendCommand(command: string, args: Record<string, number> = {}) {
+    const socket = socketRef.current
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'command', command, ...args, clientId: 'teleprompter-front' }))
+    }
+  }
+
+  useEffect(() => {
+    let reconnectTimer: number | undefined
+    let disposed = false
+
+    function connect() {
+      if (disposed) return
+      setBackendStatus('connecting')
+      const socketUrl = new URL(`/ws/${encodeURIComponent(SESSION_ID)}`, API_URL)
+      socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+      const socket = new WebSocket(socketUrl)
+      socketRef.current = socket
+
+      socket.onopen = () => setBackendStatus('connected')
+      socket.onmessage = event => {
+        let message: { type?: string; state?: RealtimeState }
+        try {
+          message = JSON.parse(event.data) as typeof message
+        } catch {
+          console.error('Resposta inválida recebida do backend.')
+          return
+        }
+
+        if (message.type === 'welcome') {
+          if (message.state) applyRemoteState(message.state)
+          else sendState(socket)
+        } else if ((message.type === 'state' || message.type === 'command') && message.state) {
+          applyRemoteState(message.state)
+        }
+      }
+      socket.onclose = () => {
+        if (socketRef.current === socket) socketRef.current = null
+        if (disposed) return
+        setBackendStatus('disconnected')
+        reconnectTimer = window.setTimeout(connect, 2000)
+      }
+      socket.onerror = () => socket.close()
+    }
+
+    function sendState(socket: WebSocket) {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'sync', clientId: 'teleprompter-front', state: latestStateRef.current }))
+      }
+    }
+
+    connect()
+    return () => {
+      disposed = true
+      window.clearTimeout(reconnectTimer)
+      socketRef.current?.close()
+      socketRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const state: RealtimeState = {
+      selectedStory,
+      pageIndex,
+      paused,
+      speed,
+      fontSize,
+      editorialStories,
+      operatorOverride,
+      readingPreferences: preferences
+    }
+    latestStateRef.current = state
+    const serializedState = JSON.stringify(state)
+    if (remoteStateRef.current === serializedState) {
+      remoteStateRef.current = null
+      return
+    }
+    const socket = socketRef.current
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'sync', clientId: 'teleprompter-front', state }))
+    }
+  }, [selectedStory, pageIndex, paused, speed, fontSize, editorialStories, operatorOverride, preferences])
 
   useEffect(() => {
     try { localStorage.setItem('teleprompter-editorial-stories-v1', JSON.stringify(editorialStories)) } catch { /* classificação permanece nesta sessão */ }
@@ -87,27 +239,35 @@ function App() {
   const nextStory = editorialStories[selectedStory + 1]
   const hasReviewEvent = filter === 'Todas as matérias' || filter === editorialStories[0]?.headline
   const page = story.pages[Math.min(pageIndex, story.pages.length - 1)]
-  const totalPages = useMemo(() => editorialStories.reduce((sum, item) => sum + item.pages.length, 0), [])
+  const totalPages = useMemo(() => editorialStories.reduce((sum, item) => sum + item.pages.length, 0), [editorialStories])
+  const previewStories = importStories ?? editorialStories
+  const previewPageCount = previewStories.reduce((sum, item) => sum + item.pages.length, 0)
   const globalPage = editorialStories.slice(0, selectedStory).reduce((sum, item) => sum + item.pages.length, 0) + pageIndex + 1
 
   function takeManualControl() {
+    sendCommand('take_control')
     setOperatorOverride(true)
     setPaused(true)
   }
   function toggleReading() {
     setOperatorOverride(true)
+    sendCommand(paused ? 'resume' : 'pause')
     setPaused(value => !value)
   }
   function chooseStory(index: number) {
     if (!editorialStories[index]) return
+    sendCommand('select_story', { selectedStory: index })
     setSelectedStory(index)
     setPageIndex(0)
-    takeManualControl()
+    setOperatorOverride(true)
+    setPaused(true)
   }
   function choosePage(index: number) {
     if (!story.pages[index]) return
+    sendCommand('select_page', { pageIndex: index })
     setPageIndex(index)
-    takeManualControl()
+    setOperatorOverride(true)
+    setPaused(true)
   }
   function updateCurrentStory(patch: Partial<Story>) {
     setEditorialStories(current => current.map((item, index) => index === selectedStory ? { ...item, ...patch } : item))
@@ -118,7 +278,9 @@ function App() {
     setClassificationSaved(true)
   }
   function previousPage() {
-    takeManualControl()
+    sendCommand('previous')
+    setOperatorOverride(true)
+    setPaused(true)
     if (pageIndex > 0) setPageIndex(pageIndex - 1)
     else if (selectedStory > 0) {
       const previousStory = editorialStories[selectedStory - 1]
@@ -129,7 +291,9 @@ function App() {
     }
   }
   function nextPage() {
-    takeManualControl()
+    sendCommand('next')
+    setOperatorOverride(true)
+    setPaused(true)
     if (pageIndex < story.pages.length - 1) setPageIndex(pageIndex + 1)
     else if (selectedStory < editorialStories.length - 1) {
       const followingStory = editorialStories[selectedStory + 1]
@@ -140,10 +304,54 @@ function App() {
     }
   }
 
+  async function handleRundownFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    try {
+      const parsed: unknown = JSON.parse(await file.text())
+      setImportStories(parseRundownJson(parsed))
+      setImportFileName(file.name)
+      setImportStatus('Prévia pronta. Confira a ordem e os títulos antes de importar.')
+    } catch (error) {
+      setImportStories(null)
+      setImportFileName('')
+      setImportStatus(error instanceof Error ? error.message : 'Não foi possível ler o arquivo JSON.')
+    }
+  }
+
+  async function importRundown() {
+    setImporting(true)
+    setImportStatus('')
+    try {
+      const response = await fetch(`${API_URL}/api/sessions/${encodeURIComponent(SESSION_ID)}/rundown`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stories: importStories ?? editorialStories })
+      })
+      const result = await response.json() as {
+        detail?: string | Array<{ msg?: string }>
+        state?: RealtimeState
+        storiesImported?: number
+        pagesImported?: number
+      }
+      if (!response.ok) {
+        const detail = Array.isArray(result.detail) ? result.detail.map(issue => issue.msg).filter(Boolean).join('; ') : result.detail
+        throw new Error(detail || `Falha na importação (HTTP ${response.status}).`)
+      }
+      if (result.state) applyRemoteState(result.state)
+      setImportStatus(`${result.storiesImported} matérias e ${result.pagesImported} páginas importadas e compartilhadas.`)
+      setTab('Operação ao vivo')
+    } catch (error) {
+      setImportStatus(error instanceof Error ? error.message : 'Falha ao importar o espelho.')
+    } finally {
+      setImporting(false)
+    }
+  }
+
   return <div className="app">
     <header className="topbar">
       <div className="brand"><div className="brand-mark">T</div><div><strong>Teleprompter</strong><span>Console do operador</span></div></div>
-      <div className="top-meta"><span className="environment">AMBIENTE DE DEMONSTRAÇÃO</span><span className={`connection ${connected ? 'online' : ''}`}>● {connected ? 'iNEWS · conectado' : 'iNEWS · configuração'}</span><strong>19:07:12</strong><span className="avatar">MC</span></div>
+      <div className="top-meta"><span className="environment">SESSÃO · {SESSION_ID}</span><span className={`connection ${backendStatus === 'connected' ? 'online' : ''}`}>● API · {backendStatus === 'connected' ? 'conectada' : backendStatus === 'connecting' ? 'conectando' : 'desconectada'}</span><strong>19:07:12</strong><span className="avatar">MC</span></div>
     </header>
 
     <nav className="tabs" aria-label="Navegação principal">
@@ -155,18 +363,19 @@ function App() {
     </nav>
 
     {tab === 'Conexão iNEWS' && <main className="page-wrap">
-      <div className="page-title"><div><p className="eyebrow">CONFIGURAÇÃO E IMPORTAÇÃO</p><h1>Preparar a operação</h1><p>Configure a integração e escolha o espelho que será acompanhado no teleprompter.</p></div><span className="date-label">05 out. 2026 · 19:00–19:30 · Espelho v12</span></div>
+      <div className="page-title"><div><p className="eyebrow">CONFIGURAÇÃO E IMPORTAÇÃO</p><h1>Preparar a operação</h1><p>Revise o arquivo do espelho antes de compartilhá-lo com as telas conectadas à sessão.</p></div><span className="date-label">Sessão · {SESSION_ID}</span></div>
       <div className="setup-grid">
-        <section className="panel connection-panel"><h3>♧　Conexão ao iNEWS</h3><p className="muted">Perfil de exemplo para a redação. Nenhuma conexão real será estabelecida.</p>
-          <label>Servidor iNEWS<input defaultValue="inews.redacao.exemplo" /></label><div className="input-row"><label>Usuário<input defaultValue="operador.estudio.a" /></label><label>Porta<input defaultValue="443" /></label></div><label>Senha<input type="password" defaultValue="demonstracao" /></label>
-          <div className="secure">✓ Conexão segura · TLS</div><button className="primary full" onClick={() => setConnected(!connected)}>{connected ? 'Desconectar' : 'Testar conexão'}</button>
-          <div className={`notice ${connected ? 'success' : ''}`}>● {connected ? 'Teste concluído' : 'Teste de conexão · exemplo'}<p>{connected ? 'Estado simulado como conectado. Nenhuma chamada externa foi realizada.' : 'Servidor validado no ambiente ilustrativo. Espelhos disponíveis para seleção.'}</p></div>
-          <p className="tiny muted">A importação preserva a ordem das matérias e a divisão do texto em páginas.</p>
+        <section className="panel connection-panel"><h3>♧　Integração com iNEWS</h3>
+          <div className="notice warning">Integração direta não configurada<p>Este projeto ainda não tem um endpoint, credenciais ou formato de exportação da instalação iNEWS. Não envie senha nesta tela. Até a equipe de infraestrutura fornecer a interface autorizada, carregue um JSON no formato documentado.</p></div>
+          <label>Carregar arquivo do espelho (.json)<input type="file" accept=".json,application/json" onChange={event => void handleRundownFileChange(event)} /></label>
+          <p className="tiny muted">Aceita um array de matérias ou um objeto com a propriedade <code>stories</code>. Títulos, sequência, páginas e campos editoriais são preservados.</p>
+          {importFileName && <p className="tiny muted">Arquivo: {importFileName}</p>}
+          {importStatus && <div className={`notice ${importStatus.includes('importadas') || importStatus.includes('Prévia pronta') ? 'success' : 'warning'}`} role="status">{importStatus}</div>}
         </section>
-        <section className="panel import-panel"><div className="panel-heading"><h3>Selecionar espelho</h3><button className="secondary" onClick={() => setConnected(false)}>↻ Atualizar lista</button></div><select className="mirror-select" defaultValue="jornal"><option value="jornal">Jornal da Noite — 05/10/2026</option><option value="manha">Jornal da Manhã — demonstração</option></select>
-          <div className="table-heading"><div><h3>Prévia da importação</h3><p className="muted">Bloco A · {editorialStories.length} matérias · {totalPages} páginas</p></div><span className="tiny muted">PRÉVIA</span></div>
-          <div className="data-table"><div className="table-row table-head"><span>ID</span><span>MATÉRIA</span><span>FORMATO</span><span>DURAÇÃO</span></div>{editorialStories.map((s, i) => <div className="table-row" key={s.id}><span>{s.code}</span><span>{s.headline}</span><span>{i === 0 ? 'CABEÇA + VT' : 'NOTA'}</span><span>00:{String(45 + i * 15).padStart(2, '0')}</span></div>)}</div>
-          <div className="import-bottom"><span className="success-text">✓ {totalPages} textos prontos</span><button className="primary" onClick={() => { setConnected(true); setTab('Operação ao vivo') }}>↓ Importar espelho e abrir operação</button></div>
+        <section className="panel import-panel"><div className="panel-heading"><h3>Prévia do espelho</h3><span className="tiny muted">{importStories ? 'ARQUIVO SELECIONADO' : 'ROTEIRO ATUAL'}</span></div>
+          <div className="table-heading"><div><h3>Matérias e ordem de leitura</h3><p className="muted">{previewStories.length} matérias · {previewPageCount} páginas</p></div></div>
+          <div className="data-table"><div className="table-row table-head"><span>ID</span><span>MATÉRIA</span><span>CATEGORIA</span><span>PÁGINAS</span></div>{previewStories.map(s => <div className="table-row" key={s.id}><span>{s.code}</span><span>{s.headline}</span><span>{s.category}</span><span>{s.pages.length}</span></div>)}</div>
+          <div className="import-bottom"><span className="success-text">✓ {previewPageCount} páginas na prévia</span><button className="primary" disabled={importing} onClick={() => void importRundown()}>{importing ? 'Importando…' : '↓ Importar espelho e abrir operação'}</button></div>
         </section>
       </div>
     </main>}
@@ -202,7 +411,7 @@ function App() {
         </div>
         <div className="editorial-actions"><span className="tiny muted">A classificação é manual e fica salva neste navegador.</span><button className="primary" onClick={saveClassification}>Salvar classificação</button></div></details>
       </section>
-      <div className="control-bar"><div className="transport"><button className="secondary" onClick={previousPage}>◁ Anterior</button><button className="primary" onClick={toggleReading}>{paused ? '▶ Retomar' : 'Ⅱ Pausar'}</button><button className="secondary" onClick={nextPage}>▷ Próxima</button></div><button className={`secondary ${operatorOverride ? 'manual-active' : ''}`} onClick={() => { takeManualControl(); setTab('Operação ao vivo') }}>Assumir controle manual</button><button className="secondary return" onClick={() => { chooseStory(0); setPaused(false) }}>↶ Retomar roteiro</button><details className="control-options"><summary>Ajustes de leitura · {speed.toFixed(1)}x · {fontSize} px</summary><div className="control-options-content"><div className="setting"><span>VELOCIDADE</span><button className="mini" onClick={() => setSpeed(Math.max(.5, +(speed - .1).toFixed(1)))}>−</button><strong>{speed.toFixed(1)}x</strong><button className="mini" onClick={() => setSpeed(Math.min(2, +(speed + .1).toFixed(1)))}>+</button><div className="range"><span style={{width:`${(speed-.5)/1.5*100}%`}}/></div></div><div className="setting"><span>FONTE</span><button className="mini" onClick={() => setFontSize(Math.max(24, fontSize - 2))}>A−</button><strong>{fontSize} px</strong><button className="mini" onClick={() => setFontSize(Math.min(60, fontSize + 2))}>A+</button></div></div></details></div>
+      <div className="control-bar"><div className="transport"><button className="secondary" onClick={previousPage}>◁ Anterior</button><button className="primary" onClick={toggleReading}>{paused ? '▶ Retomar' : 'Ⅱ Pausar'}</button><button className="secondary" onClick={nextPage}>▷ Próxima</button></div><button className={`secondary ${operatorOverride ? 'manual-active' : ''}`} onClick={() => { takeManualControl(); setTab('Operação ao vivo') }}>Assumir controle manual</button><button className="secondary return" onClick={() => { chooseStory(0); sendCommand('resume'); setPaused(false) }}>↶ Retomar roteiro</button><details className="control-options"><summary>Ajustes de leitura · {speed.toFixed(1)}x · {fontSize} px</summary><div className="control-options-content"><div className="setting"><span>VELOCIDADE</span><button className="mini" onClick={() => setSpeed(Math.max(.5, +(speed - .1).toFixed(1)))}>−</button><strong>{speed.toFixed(1)}x</strong><button className="mini" onClick={() => setSpeed(Math.min(2, +(speed + .1).toFixed(1)))}>+</button><div className="range"><span style={{width:`${(speed-.5)/1.5*100}%`}}/></div></div><div className="setting"><span>FONTE</span><button className="mini" onClick={() => setFontSize(Math.max(24, fontSize - 2))}>A−</button><strong>{fontSize} px</strong><button className="mini" onClick={() => setFontSize(Math.min(60, fontSize + 2))}>A+</button></div></div></details></div>
       {paused && <div className="pause-banner">Leitura pausada. O operador mantém o controle da página atual.</div>}
     </main>}
 

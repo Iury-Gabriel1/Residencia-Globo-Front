@@ -1,49 +1,51 @@
 # Teleprompter — interface do operador e apresentador
 
-Protótipo de interface feito com React, TypeScript e Vite, baseado nas referências do Figma.
+Protótipo em React, TypeScript e Vite com sincronização de operação pelo backend FastAPI.
 
 ## Executar localmente
+
+Em um terminal, inicie o backend conforme [instruções do backend](../Residencia-Globo-Back/README.md). Para execução rápida sem PostgreSQL, o backend usa SQLite local:
+
+```bash
+cd ../Residencia-Globo-Back
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Em outro terminal:
 
 ```bash
 npm install
 npm run dev
 ```
 
-Para validar a compilação:
+Por padrão, o front se conecta a `http://localhost:8000` e à sessão `demo`. Configure outro endereço da API em `.env.local`:
+
+```env
+VITE_API_URL=http://IP-DO-SERVIDOR:8000
+```
+
+Use o mesmo identificador de sessão nas duas telas, por exemplo `http://localhost:5173/?session=estudio-a`. As preferências e o roteiro operacional ficam persistidos por sessão no banco do backend.
+
+## Fluxo de operação
+
+- A aba **Operação ao vivo** controla matéria, página, pausa/retomada, avanço/retorno, velocidade e tamanho do texto.
+- A aba **Teleprompter** apresenta o roteiro correspondente. Comandos enviados por qualquer tela são transmitidos via WebSocket para os clientes conectados à mesma sessão.
+- A interface tenta reconectar ao backend quando a conexão cai. O estado persistido é carregado ao reconectar.
+- A aba **Preparar a operação** valida e mostra uma prévia do JSON antes de importar. O formato aceito é um array de matérias ou um objeto `{ "stories": [...] }`, seguindo o esquema de `src/data/stories.json`. A ordem, os títulos, as páginas e os metadados editoriais são mantidos.
+
+## iNEWS
+
+A tela informa explicitamente que a conexão direta com iNEWS ainda não está configurada. Não existem detalhes do endpoint, versão, protocolo de autenticação nem acesso ao servidor da redação neste projeto. Até que a equipe responsável forneça a interface autorizada e um exemplo de exportação, use a importação JSON; ela não representa uma conexão nem autenticação iNEWS.
+
+## Validar
 
 ```bash
 npm run build
 ```
 
-## Interface do operador
+## Funcionalidades demonstrativas
 
-- **Conexão iNEWS:** campos de configuração demonstrativos e prévia de importação do espelho.
-- **Operação ao vivo:** lista de matérias, área de leitura, indicadores de operação e monitor de áudio demonstrativo.
-- **Improvisos:** visualização do trecho transcrito de exemplo, anotação editável e ação de revisão.
-- **Leitura ampliada:** texto ampliado e monitor resumido da operação.
-
-## Interface do apresentador
-
-Selecione a aba **Teleprompter** para abrir uma interface independente, com foco no texto, título da matéria, categoria, página atual, progresso do roteiro e controles para anterior, pausa/retomada, próxima página, velocidade de rolagem e tamanho da fonte. A rolagem automática percorre o conteúdo quando ele excede a área visível.
-
-## Limitações atuais
-
-Este projeto é um protótipo de front-end. A conexão iNEWS, a captura de áudio, a transcrição, a sincronização em rede entre telas e a identificação inteligente de mudanças de assunto ainda não estão implementadas. Os estados e exemplos de áudio são simulados.
-
-
-## Personalização e acessibilidade
-
-Na aba **Teleprompter**, use **Personalizar leitura** para alterar família tipográfica, tamanho do texto, cores de fundo e texto, velocidade de rolagem e tema de alto contraste. As opções de tema incluem modo noturno, claro e alto contraste. O botão **Restaurar padrão** recupera os valores iniciais.
-
-As preferências são gravadas no `localStorage` do navegador deste dispositivo. Elas não são sincronizadas entre dispositivos nem associadas a uma conta, pois o projeto ainda não possui backend.
-
-Atalhos de teclado na tela do apresentador: `Espaço` pausa/retoma, `←` volta uma página, `→` avança, `+`/`-` aumenta ou reduz o texto e `Esc` fecha a personalização. Os atalhos não interceptam a digitação quando o foco está em botões ou campos de formulário.
-
-
-## Classificação editorial e navegação manual
-
-Na aba **Operação ao vivo**, o operador pode editar a chamada da matéria, escolher uma categoria editorial (incluindo notícia séria, falecimento, política, previsão do tempo e conteúdo leve), definir o tom, ajustar o nível de alerta e editar a orientação para o apresentador. As alterações ficam salvas no armazenamento local do navegador. Alertas editoriais aparecem na lista do espelho e na área de leitura do apresentador.
-
-A lista do espelho permite selecionar uma matéria manualmente; o seletor **Página atual** permite escolher uma página específica. Ao selecionar matéria ou página, a leitura é pausada para evitar saltos inesperados. Os botões Anterior, Próxima e Pausar/Retomar continuam disponíveis ao operador. Uma prévia da próxima matéria aparece no painel de classificação.
-
-A classificação, os indicadores de conexão e os dados de áudio são demonstrativos e locais; não há integração real com iNEWS, backend ou reconhecimento de voz nesta etapa.
+Captura de áudio, transcrição de voz e registros de improviso continuam sendo exemplos. As preferências visuais incluem tipografia, tamanho, cores e alto contraste; são sincronizadas para os outros clientes da sessão.
