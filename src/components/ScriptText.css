@@ -1,0 +1,204 @@
+.script-content {
+  color: inherit;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.script-content mark,
+.script-editor mark {
+  color: #1d1700;
+  background: #ffe66d;
+  border-radius: 2px;
+  padding: 0 0.06em;
+}
+
+.script-content u[data-kind="covered"],
+.script-editor u[data-kind="covered"] {
+  color: #d7efff;
+  text-decoration-color: #42b9ff;
+  text-decoration-thickness: 3px;
+  text-underline-offset: 4px;
+}
+
+.script-editor-field {
+  display: grid;
+  gap: 7px;
+}
+
+.script-editor-field > label {
+  color: #9daac5;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.format-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.script-editor {
+  min-height: 120px;
+  padding: 12px;
+  border: 1px solid #303a54;
+  border-radius: 6px;
+  background: #090f1d;
+  color: #e8ecf7;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.script-editor:focus {
+  border-color: #6965f5;
+  outline: 2px solid #818cf866;
+}
+
+.script-editor p,
+.script-editor div {
+  margin: 0 0 0.6em;
+}
+
+.script-editor p:last-child,
+.script-editor div:last-child {
+  margin-bottom: 0;
+}
+
+.script-editor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 14px;
+  align-items: start;
+}
+
+.script-editor-main,
+.script-editor-sidebar {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.script-editor-title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.script-editor-title label,
+.script-editor-sidebar label {
+  display: grid;
+  gap: 6px;
+  color: #9daac5;
+  font-size: 10px;
+}
+
+.script-editor-title input,
+.script-editor-sidebar input {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #303a54;
+  border-radius: 5px;
+  background: #090f1d;
+  color: #e8ecf7;
+}
+
+.script-editor-title label:first-child {
+  flex: 1;
+}
+
+.script-editor-title label:last-child {
+  width: 140px;
+}
+
+.editor-page-list {
+  display: grid;
+  gap: 6px;
+}
+
+.editor-page-list button {
+  padding: 9px;
+  border: 1px solid #303a54;
+  border-radius: 5px;
+  background: #0a101e;
+  color: #cbd4e8;
+  text-align: left;
+}
+
+.editor-page-list button[aria-pressed="true"] {
+  border-color: #6965f5;
+  background: #1b2042;
+}
+
+.script-editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+}
+
+.script-editor-toolbar .muted {
+  margin-left: auto;
+}
+
+.live-script-copy {
+  display: grid;
+  align-content: center;
+  gap: 16px;
+  min-height: 240px;
+  max-height: 58vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: auto;
+}
+
+.script-area .retranque,
+.expanded-reading .retranque {
+  margin: 0;
+  padding: 0 0 12px;
+  border-bottom: 2px solid #655cf6;
+  color: #ffe66d;
+  font-size: inherit;
+  font-weight: 750;
+  line-height: 1.3;
+  letter-spacing: 0.025em;
+}
+
+.live-script-copy .script-content {
+  font-size: inherit;
+}
+
+.presenter-rundown-title {
+  margin: 0 0 28px;
+  padding: 0 0 16px;
+  border-bottom: 3px solid #ffe66d;
+  color: #ffe66d;
+  font-size: inherit;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.presenter-copy {
+  margin: 0 0 24px;
+  line-height: 1.5;
+}
+
+.presenter-copy .script-content {
+  font-size: inherit;
+}
+
+.manual-scroll-controls {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.manual-scroll-controls button {
+  min-width: 34px;
+}
+
+@media (max-width: 850px) {
+  .script-editor-layout {
+    grid-template-columns: 1fr;
+  }
+}

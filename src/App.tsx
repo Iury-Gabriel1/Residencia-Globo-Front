@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import storyData from './data/stories.json'
 import type { RealtimeState, Story } from './types/script'
+import { ScriptEditor, ScriptText } from './components/ScriptText'
+import './components/ScriptText.css'
 
 const initialStories = storyData as Story[]
-type Tab = 'Conexão iNEWS' | 'Operação ao vivo' | 'Improvisos' | 'Leitura ampliada' | 'Apresentador'
+type Tab = 'Preparar roteiro' | 'Editor de roteiro' | 'Operação ao vivo' | 'Improvisos' | 'Leitura ampliada' | 'Apresentador'
 type ReadingPreferences = { fontFamily: string; backgroundColor: string; textColor: string; highContrast: boolean }
 const DEFAULT_PREFERENCES: ReadingPreferences = { fontFamily: 'Arial, Helvetica, sans-serif', backgroundColor: '#0d1322', textColor: '#f4f6fd', highContrast: false }
 const PREFERENCES_KEY = 'teleprompter-reading-preferences-v1'
@@ -53,7 +55,8 @@ function App() {
   const [editorialStories, setEditorialStories] = useState<Story[]>(() => { try { const saved = localStorage.getItem('teleprompter-editorial-stories-v1'); return saved ? JSON.parse(saved) as Story[] : initialStories } catch { return initialStories } })
   const [selectedStory, setSelectedStory] = useState(0)
   const [pageIndex, setPageIndex] = useState(0)
-  const [paused, setPaused] = useState(false)
+  const [scrollPosition, setScrollPosition] = useState(0)
+  const [paused, setPaused] = useState(true)
   const [importStories, setImportStories] = useState<Story[] | null>(null)
   const [importFileName, setImportFileName] = useState('')
   const [importStatus, setImportStatus] = useState('')
@@ -70,11 +73,16 @@ function App() {
   const [classificationSaved, setClassificationSaved] = useState(true)
   const [operatorOverride, setOperatorOverride] = useState(false)
   const presenterTextRef = useRef<HTMLDivElement>(null)
+  const scrollSyncTimer = useRef<number | null>(null)
+  const stateSyncTimerRef = useRef<number | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const remoteStateRef = useRef<string | null>(null)
+  const welcomeReceivedRef = useRef(false)
+  const localChangesPendingRef = useRef(false)
   const latestStateRef = useRef<RealtimeState>({
     selectedStory,
     pageIndex,
+    scrollPosition,
     paused,
     speed,
     fontSize,
@@ -93,11 +101,17 @@ function App() {
     const safePageIndex = storyPages.length
       ? Math.min(Math.max(state.pageIndex, 0), storyPages.length - 1)
       : 0
-    const normalizedState = { ...state, selectedStory: safeStoryIndex, pageIndex: safePageIndex }
+    const normalizedState = {
+      ...state,
+      selectedStory: safeStoryIndex,
+      pageIndex: safePageIndex,
+      scrollPosition: Math.min(1, Math.max(0, state.scrollPosition ?? 0))
+    }
     remoteStateRef.current = JSON.stringify(normalizedState)
     setEditorialStories(normalizedState.editorialStories)
     setSelectedStory(safeStoryIndex)
     setPageIndex(safePageIndex)
+    setScrollPosition(normalizedState.scrollPosition)
     setPaused(normalizedState.paused)
     setSpeed(normalizedState.speed)
     setFontSize(normalizedState.fontSize)
@@ -125,7 +139,10 @@ function App() {
       const socket = new WebSocket(socketUrl)
       socketRef.current = socket
 
-      socket.onopen = () => setBackendStatus('connected')
+      socket.onopen = () => {
+        welcomeReceivedRef.current = false
+        setBackendStatus('connected')
+      }
       socket.onmessage = event => {
         let message: { type?: string; state?: RealtimeState }
         try {
@@ -136,14 +153,16 @@ function App() {
         }
 
         if (message.type === 'welcome') {
-          if (message.state) applyRemoteState(message.state)
-          else sendState(socket)
+          welcomeReceivedRef.current = true
+          if (localChangesPendingRef.current || !message.state) sendState(socket)
+          else applyRemoteState(message.state)
         } else if ((message.type === 'state' || message.type === 'command') && message.state) {
           applyRemoteState(message.state)
         }
       }
       socket.onclose = () => {
         if (socketRef.current === socket) socketRef.current = null
+        welcomeReceivedRef.current = false
         if (disposed) return
         setBackendStatus('disconnected')
         reconnectTimer = window.setTimeout(connect, 2000)
@@ -153,7 +172,12 @@ function App() {
 
     function sendState(socket: WebSocket) {
       if (socket.readyState === WebSocket.OPEN) {
+        if (stateSyncTimerRef.current !== null) {
+          window.clearTimeout(stateSyncTimerRef.current)
+          stateSyncTimerRef.current = null
+        }
         socket.send(JSON.stringify({ type: 'sync', clientId: 'teleprompter-front', state: latestStateRef.current }))
+        localChangesPendingRef.current = false
       }
     }
 
@@ -166,10 +190,17 @@ function App() {
     }
   }, [])
 
+  useEffect(() => () => {
+    if (scrollSyncTimer.current !== null) window.clearTimeout(scrollSyncTimer.current)
+    if (stateSyncTimerRef.current !== null) window.clearTimeout(stateSyncTimerRef.current)
+  }, [])
+
   useEffect(() => {
+    const previousState = JSON.stringify(latestStateRef.current)
     const state: RealtimeState = {
       selectedStory,
       pageIndex,
+      scrollPosition,
       paused,
       speed,
       fontSize,
@@ -177,17 +208,34 @@ function App() {
       operatorOverride,
       readingPreferences: preferences
     }
-    latestStateRef.current = state
     const serializedState = JSON.stringify(state)
     if (remoteStateRef.current === serializedState) {
       remoteStateRef.current = null
+      latestStateRef.current = state
+      localChangesPendingRef.current = false
       return
     }
+    if (previousState !== serializedState) localChangesPendingRef.current = true
+    latestStateRef.current = state
     const socket = socketRef.current
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'sync', clientId: 'teleprompter-front', state }))
+    if (socket?.readyState === WebSocket.OPEN && welcomeReceivedRef.current) {
+      stateSyncTimerRef.current = window.setTimeout(() => {
+        stateSyncTimerRef.current = null
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'sync', clientId: 'teleprompter-front', state }))
+          localChangesPendingRef.current = false
+        } else {
+          localChangesPendingRef.current = true
+        }
+      }, 150)
     }
-  }, [selectedStory, pageIndex, paused, speed, fontSize, editorialStories, operatorOverride, preferences])
+    return () => {
+      if (stateSyncTimerRef.current !== null) {
+        window.clearTimeout(stateSyncTimerRef.current)
+        stateSyncTimerRef.current = null
+      }
+    }
+  }, [selectedStory, pageIndex, scrollPosition, paused, speed, fontSize, editorialStories, operatorOverride, preferences])
 
   useEffect(() => {
     try { localStorage.setItem('teleprompter-editorial-stories-v1', JSON.stringify(editorialStories)) } catch { /* classificação permanece nesta sessão */ }
@@ -205,13 +253,15 @@ function App() {
       if (event.key === ' ') { event.preventDefault(); toggleReading() }
       else if (event.key === 'ArrowLeft') { event.preventDefault(); previousPage() }
       else if (event.key === 'ArrowRight') { event.preventDefault(); nextPage() }
+      else if (event.key === 'ArrowUp') { event.preventDefault(); moveReadingPoint(-220) }
+      else if (event.key === 'ArrowDown') { event.preventDefault(); moveReadingPoint(220) }
       else if (event.key === '+' || event.key === '=') { event.preventDefault(); setFontSize(value => Math.min(72, value + 2)) }
       else if (event.key === '-') { event.preventDefault(); setFontSize(value => Math.max(18, value - 2)) }
       else if (event.key === 'Escape') setShowReadingSettings(false)
     }
     window.addEventListener('keydown', handlePresenterKeys)
     return () => window.removeEventListener('keydown', handlePresenterKeys)
-  }, [tab, selectedStory, pageIndex])
+  }, [tab, selectedStory, pageIndex, paused, editorialStories])
 
   function restoreReadingDefaults() {
     setPreferences(DEFAULT_PREFERENCES)
@@ -232,8 +282,12 @@ function App() {
   }, [tab, paused, speed, selectedStory, pageIndex])
 
   useEffect(() => {
-    if (tab === 'Apresentador' && presenterTextRef.current) presenterTextRef.current.scrollTop = 0
-  }, [tab, selectedStory, pageIndex])
+    if (tab !== 'Apresentador') return
+    const element = presenterTextRef.current
+    if (!element) return
+    const maxScroll = Math.max(0, element.scrollHeight - element.clientHeight)
+    element.scrollTop = scrollPosition * maxScroll
+  }, [tab, selectedStory, pageIndex, scrollPosition, editorialStories])
 
   const story = editorialStories[selectedStory]
   const nextStory = editorialStories[selectedStory + 1]
@@ -243,11 +297,31 @@ function App() {
   const previewStories = importStories ?? editorialStories
   const previewPageCount = previewStories.reduce((sum, item) => sum + item.pages.length, 0)
   const globalPage = editorialStories.slice(0, selectedStory).reduce((sum, item) => sum + item.pages.length, 0) + pageIndex + 1
+  const progressPercent = totalPages
+    ? Math.min(100, ((globalPage - 1 + scrollPosition) / totalPages) * 100)
+    : 0
 
   function takeManualControl() {
     sendCommand('take_control')
     setOperatorOverride(true)
     setPaused(true)
+  }
+  function handlePresenterScroll() {
+    if (scrollSyncTimer.current !== null) return
+    scrollSyncTimer.current = window.setTimeout(() => {
+      scrollSyncTimer.current = null
+      const element = presenterTextRef.current
+      if (!element) return
+      const maxScroll = Math.max(0, element.scrollHeight - element.clientHeight)
+      setScrollPosition(maxScroll ? element.scrollTop / maxScroll : 0)
+    }, 120)
+  }
+  function moveReadingPoint(amount: number) {
+    setOperatorOverride(true)
+    setPaused(true)
+    const element = presenterTextRef.current
+    if (!element) return
+    element.scrollTop += amount
   }
   function toggleReading() {
     setOperatorOverride(true)
@@ -259,6 +333,7 @@ function App() {
     sendCommand('select_story', { selectedStory: index })
     setSelectedStory(index)
     setPageIndex(0)
+    setScrollPosition(0)
     setOperatorOverride(true)
     setPaused(true)
   }
@@ -266,11 +341,18 @@ function App() {
     if (!story.pages[index]) return
     sendCommand('select_page', { pageIndex: index })
     setPageIndex(index)
+    setScrollPosition(0)
     setOperatorOverride(true)
     setPaused(true)
   }
   function updateCurrentStory(patch: Partial<Story>) {
     setEditorialStories(current => current.map((item, index) => index === selectedStory ? { ...item, ...patch } : item))
+    setClassificationSaved(false)
+  }
+  function updateCurrentPage(patch: Partial<Story['pages'][number]>) {
+    setEditorialStories(current => current.map((item, index) => index === selectedStory
+      ? { ...item, pages: item.pages.map((itemPage, page) => page === pageIndex ? { ...itemPage, ...patch } : itemPage) }
+      : item))
     setClassificationSaved(false)
   }
   function saveClassification() {
@@ -289,6 +371,7 @@ function App() {
         setPageIndex(previousStory.pages.length - 1)
       }
     }
+    setScrollPosition(0)
   }
   function nextPage() {
     sendCommand('next')
@@ -302,6 +385,7 @@ function App() {
         setPageIndex(0)
       }
     }
+    setScrollPosition(0)
   }
 
   async function handleRundownFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -355,18 +439,18 @@ function App() {
     </header>
 
     <nav className="tabs" aria-label="Navegação principal">
-      {(['Conexão iNEWS', 'Operação ao vivo', 'Improvisos', 'Leitura ampliada', 'Apresentador'] as Tab[]).map(item =>
+      {(['Preparar roteiro', 'Editor de roteiro', 'Operação ao vivo', 'Leitura ampliada', 'Apresentador'] as Tab[]).map(item =>
         <button key={item} className={`tab ${tab === item ? 'active' : ''}`} aria-current={tab === item ? 'page' : undefined} onClick={() => setTab(item)}>
           {item === 'Apresentador' ? 'Teleprompter' : item}{item === 'Improvisos' && <span className="tab-count">1</span>}
         </button>)}
       <div className="station">Estúdio A / Mariana Costa</div>
     </nav>
 
-    {tab === 'Conexão iNEWS' && <main className="page-wrap">
+    {tab === 'Preparar roteiro' && <main className="page-wrap">
       <div className="page-title"><div><p className="eyebrow">CONFIGURAÇÃO E IMPORTAÇÃO</p><h1>Preparar a operação</h1><p>Revise o arquivo do espelho antes de compartilhá-lo com as telas conectadas à sessão.</p></div><span className="date-label">Sessão · {SESSION_ID}</span></div>
       <div className="setup-grid">
-        <section className="panel connection-panel"><h3>♧　Integração com iNEWS</h3>
-          <div className="notice warning">Integração direta não configurada<p>Este projeto ainda não tem um endpoint, credenciais ou formato de exportação da instalação iNEWS. Não envie senha nesta tela. Até a equipe de infraestrutura fornecer a interface autorizada, carregue um JSON no formato documentado.</p></div>
+        <section className="panel connection-panel"><h3>Preparar roteiro</h3>
+          <div className="notice">Importação por arquivo<p>Este produto não se conecta a sistemas editoriais externos. Use um arquivo JSON para carregar o espelho e revisar a prévia antes de compartilhar o roteiro com a sessão.</p></div>
           <label>Carregar arquivo do espelho (.json)<input type="file" accept=".json,application/json" onChange={event => void handleRundownFileChange(event)} /></label>
           <p className="tiny muted">Aceita um array de matérias ou um objeto com a propriedade <code>stories</code>. Títulos, sequência, páginas e campos editoriais são preservados.</p>
           {importFileName && <p className="tiny muted">Arquivo: {importFileName}</p>}
@@ -380,24 +464,70 @@ function App() {
       </div>
     </main>}
 
+    {tab === 'Editor de roteiro' && <main className="page-wrap">
+      <div className="page-title"><div><p className="eyebrow">EDIÇÃO DO ROTEIRO</p><h1>Editor de roteiro</h1><p>As alterações são salvas e sincronizadas com as telas da sessão em tempo real.</p></div><span className="date-label">{backendStatus === 'connected' ? 'Sincronização ativa' : 'Modo manual · aguardando conexão'}</span></div>
+      <div className="script-editor-layout">
+        <section className="panel script-editor-main">
+          <div className="script-editor-title">
+            <label>Retranca / título da matéria<input aria-label="Título da matéria" value={story.headline} onChange={event => updateCurrentStory({ headline: event.target.value })} /></label>
+            <label>Código<input aria-label="Código da matéria" value={story.code} onChange={event => updateCurrentStory({ code: event.target.value })} /></label>
+          </div>
+          <div className="script-editor-title">
+            <label>Retranca da página<input aria-label="Retranca da página" value={page.title} onChange={event => updateCurrentPage({ title: event.target.value })} /></label>
+            <label>Identificação editorial<input aria-label="Identificação editorial da página" value={page.label} onChange={event => updateCurrentPage({ label: event.target.value })} /></label>
+          </div>
+          <ScriptEditor
+            label="Texto do roteiro"
+            html={page.bodyHtml}
+            text={page.text}
+            onChange={(html, text) => updateCurrentPage({ bodyHtml: html, text })}
+          />
+          <ScriptEditor
+            label="Texto complementar"
+            html={page.secondaryHtml}
+            text={page.secondary ?? ''}
+            onChange={(html, text) => updateCurrentPage({ secondaryHtml: html, secondary: text })}
+          />
+          <div className="script-editor-toolbar">
+            <button className="secondary" onClick={() => setTab('Apresentador')}>Abrir tela do TP</button>
+            <span className="muted">{backendStatus === 'connected' ? '● Alterações sincronizadas' : '● Alterações mantidas localmente até reconectar'}</span>
+          </div>
+        </section>
+        <aside className="panel script-editor-sidebar">
+          <div className="panel-heading"><h3>Matérias</h3><span className="tiny muted">{editorialStories.length}</span></div>
+          <div className="rundown-list">{editorialStories.map((item, index) =>
+            <button key={item.id} className={`rundown-item ${selectedStory === index ? 'selected' : ''}`} aria-pressed={selectedStory === index} onClick={() => chooseStory(index)}>
+              <span className="rundown-code">{item.code}</span><span className="rundown-copy"><strong>{item.headline}</strong><small>{item.pages.length} página(s)</small></span>
+            </button>)}
+          </div>
+          <div className="panel-heading"><h3>Páginas</h3><span className="tiny muted">{story.pages.length}</span></div>
+          <div className="editor-page-list">{story.pages.map((item, index) =>
+            <button key={item.id} aria-pressed={pageIndex === index} onClick={() => choosePage(index)}>{index + 1}. {item.title}</button>)}
+          </div>
+          <p className="tiny muted">Marca-texto indica ênfase. Sublinhado azul identifica nota coberta. As marcações são preservadas na tela do apresentador.</p>
+        </aside>
+      </div>
+    </main>}
+
     {tab === 'Operação ao vivo' && <main className="page-wrap">
-      <div className="page-title"><div><p className="eyebrow">ACOMPANHAMENTO DA LEITURA</p><h1>Operação ao vivo</h1><p>Espelho importado · Acompanhamento da leitura e da voz do apresentador.</p></div><div className="edition"><strong>Jornal da Noite</strong><span>05 out. 2026 · 19:00–19:30 · Espelho v12</span></div></div>
+      <div className="page-title"><div><p className="eyebrow">ACOMPANHAMENTO DA LEITURA</p><h1>Operação ao vivo</h1><p>Edite o roteiro, escolha a matéria e controle manualmente a leitura.</p></div><div className="edition"><strong>Jornal da Noite</strong><span>05 out. 2026 · 19:00–19:30 · Espelho v12</span></div></div>
       <div className="live-grid">
         <aside className="panel rundown"><div className="panel-heading"><h3>Espelho do jornal</h3><span className="pill green">● Sincronizado · v12</span></div><p className="tiny muted">Bloco A · {editorialStories.length} matérias · {totalPages} páginas</p>
           <div className="rundown-list">{editorialStories.map((s, i) => <button key={s.id} className={`rundown-item ${selectedStory === i ? 'selected' : ''}`} aria-pressed={selectedStory === i} onClick={() => chooseStory(i)}><span className="rundown-code">{s.code}</span><span className="rundown-copy"><strong>{s.headline}</strong><small>{s.category} · {s.pages.length} pág.</small>{(s.alertLevel === 'critical' || s.alertLevel === 'attention') && <em className={`rundown-alert ${s.alertLevel}`}>{s.alertLevel === 'critical' ? 'Alerta importante' : 'Atenção editorial'}</em>}</span>{selectedStory === i && <span className="now">No ar</span>}</button>)}</div>
         </aside>
         <section className="panel prompter-panel">
-          <div className="prompter-head"><div><span className="pill green">● No ar · {story.code}</span><span className="pill editorial-category">{story.category} · Tom {story.tone}</span><strong>{story.headline}</strong><small>{story.pages.length} página(s) · Texto iNEWS v12</small></div><div className="operator-page-picker"><label>Página atual<select aria-label="Selecionar página da matéria" value={pageIndex} onChange={e => choosePage(Number(e.target.value))}>{story.pages.map((item, index) => <option key={item.id} value={index}>{index + 1}. {item.title}</option>)}</select></label><div className="page-count">Página {pageIndex + 1} de {story.pages.length}<br/><span>Página geral {globalPage}/{totalPages}</span></div></div></div>
+          <div className="prompter-head"><div><span className="pill green">● No ar · {story.code}</span><span className="pill editorial-category">{story.category} · Tom {story.tone}</span><strong>{story.headline}</strong><small>{story.pages.length} página(s) · Roteiro v12</small></div><div className="operator-page-picker"><label>Página atual<select aria-label="Selecionar página da matéria" value={pageIndex} onChange={e => choosePage(Number(e.target.value))}>{story.pages.map((item, index) => <option key={item.id} value={index}>{index + 1}. {item.title}</option>)}</select></label><div className="page-count">Página {pageIndex + 1} de {story.pages.length}<br/><span>Página geral {globalPage}/{totalPages}</span></div></div></div>
           <div className="script-area">
             <div className="script-label">{page.label} <span>· {story.category.toUpperCase()} · TOM {story.tone.toUpperCase()}</span></div>
             {(story.alertLevel === 'critical' || story.alertLevel === 'attention') && <div className={`editorial-alert compact ${story.alertLevel}`}><strong>{story.category} · {story.tone}</strong><p>{story.guidance}</p></div>}
-            <h2>{page.text}</h2>
-            {page.secondary && <p>{page.secondary}</p>}
+            <div className="retranque" style={{ fontSize: `${fontSize}px` }}>{story.headline} · {page.title}</div>
+            <div style={{ fontSize: `${fontSize}px` }}><ScriptText className="script-content" html={page.bodyHtml} text={page.text} /></div>
+            {page.secondary && <div style={{ fontSize: `${fontSize}px` }}><ScriptText className="script-content" html={page.secondaryHtml} text={page.secondary} /></div>}
             <span className="script-keywords">Palavras-chave: {page.keywords.join(' · ')}</span>
           </div>
-          <div className="prompter-footer"><span>Linha {String(pageIndex + 4).padStart(2, '0')} de {String(totalPages * 3).padStart(2, '0')}</span><div className="progress"><span style={{width: `${globalPage / totalPages * 100}%`}} /></div><span>00:24 / 02:30</span><button className="secondary small" onClick={() => setShowExpanded(true)}>↗ Ampliar</button></div>
+          <div className="prompter-footer"><span>Linha {String(pageIndex + 4).padStart(2, '0')} de {String(totalPages * 3).padStart(2, '0')}</span><div className="progress"><span style={{width: `${progressPercent}%`}} /></div><span>00:24 / 02:30</span><button className="secondary small" onClick={() => setShowExpanded(true)}>↗ Ampliar</button></div>
         </section>
-        <details className="panel voice-panel"><summary><span className="voice-title">Voz do apresentador</span><span className="pill green">● Escuta ativa · exemplo</span><span className="voice-summary-name">Lucas Almeida · Microfone 01</span></summary><div className="voice-details"><div className="waveform" aria-label="Representação ilustrativa de atividade de áudio">{Array.from({length:34}, (_,i)=><i key={i} style={{height: `${8 + Math.abs(Math.sin(i * 1.7)) * (i % 5 === 0 ? 25 : 16)}px`}} />)}</div><div className="voice-stats"><span>Nível -16 dB</span><span className="green-text">Sinal estável</span></div><div className="voice-transcript"><span className="tiny muted">FALA RECONHECIDA · EXEMPLO</span><p>“A expectativa é atender oito mil passageiros por dia...”</p><span className="tiny muted">Confiança da transcrição: 96%</span></div><div className="notice success">Acompanhando o roteiro<p>Linha 04 de 18 · Ritmo estimado: 142 palavras/min.</p></div><p className="tiny muted">A captura e a transcrição de áudio ainda não estão conectadas.</p></div></details>
+        <aside className="panel voice-panel"><h3>Operação manual</h3><p className="muted">A rolagem e a navegação são controladas pelo operador ou pelo apresentador.</p><div className="notice">Áudio e reconhecimento de fala ainda não estão implementados.<p>Se a automação futura falhar, os controles de pausa, retomada, rolagem e navegação continuam disponíveis.</p></div><button className="secondary full" onClick={() => setTab('Editor de roteiro')}>Abrir editor</button></aside>
       </div>
       <section className="panel editorial-panel">
         <div className="panel-heading"><div><p className="eyebrow">IDENTIFICAÇÃO EDITORIAL</p><h3>Classificação da matéria selecionada</h3></div></div>
@@ -418,13 +548,13 @@ function App() {
     {tab === 'Improvisos' && <main className="page-wrap">
       <div className="page-title"><div><p className="eyebrow">REVISÃO EDITORIAL</p><h1>Registro de improvisos</h1><p>Revise as transcrições e mantenha as anotações vinculadas à matéria do espelho.</p></div><div className="edition"><strong>Jornal da Noite</strong><span>05 out. 2026 · Espelho v12</span></div></div>
       <div className="review-grid"><aside className="panel review-sidebar"><h3>Nesta edição</h3><label className="review-filter-label">Filtrar por matéria<select value={filter} onChange={e => setFilter(e.target.value)}><option>Todas as matérias</option>{editorialStories.map(s=><option key={s.id}>{s.headline}</option>)}</select></label>{hasReviewEvent && <div className="review-event"><div className="event-top"><strong>19:07:18</strong><span className="pill green">{reviewed ? 'Revisado' : 'Pendente'}</span></div><strong>Nova linha de ônibus</strong><p>A03 · Lucas Almeida · 8 segundos</p><small>Anotação do operador salva</small></div>}<details className="review-stats-details"><summary>Resumo da edição</summary><div className="review-stats"><span>RESUMO <b>{hasReviewEvent ? 1 : 0}</b></span><span>Revisados <b>{hasReviewEvent && reviewed ? 1 : 0}</b></span><span>Pendentes <b>{hasReviewEvent && !reviewed ? 1 : 0}</b></span><span>Tempo total fora do roteiro <b>{hasReviewEvent ? '00:08' : '00:00'}</b></span></div></details></aside>
-        <section className="review-main">{hasReviewEvent ? <><article className="panel"><div className="review-title"><div><h2>A03 · Nova linha de ônibus</h2><p className="muted">Jornal da Noite · Bloco A · Texto iNEWS v12</p></div><span className={`pill ${reviewed ? 'green' : 'yellow'}`}>● {reviewed ? 'Revisado' : '1 improviso'}</span></div><details className="event-details"><summary>Horário e apresentador</summary><div className="event-metadata"><span>INÍCIO<strong>19:07:18</strong></span><span>FINAL<strong>19:07:26</strong></span><span>DURAÇÃO<strong>8 segundos</strong></span><span>APRESENTADOR<strong>Lucas Almeida</strong></span></div></details><div className="transcript-box"><span>TRECHO TRANSCRITO · IMPROVISO</span><p>“É quem depende do transporte público sabe como essa espera faz diferença no dia a dia.”</p></div><p className="tiny muted">ROTEIRO RETOMADO · LINHA 19:07:27</p><p className="review-quote">O serviço começa na próxima segunda-feira, com viagens a cada quinze minutos nos horários de pico.</p></article>
+        <section className="review-main">{hasReviewEvent ? <><article className="panel"><div className="review-title"><div><h2>A03 · Nova linha de ônibus</h2><p className="muted">Jornal da Noite · Bloco A · Roteiro v12</p></div><span className={`pill ${reviewed ? 'green' : 'yellow'}`}>● {reviewed ? 'Revisado' : '1 improviso'}</span></div><details className="event-details"><summary>Horário e apresentador</summary><div className="event-metadata"><span>INÍCIO<strong>19:07:18</strong></span><span>FINAL<strong>19:07:26</strong></span><span>DURAÇÃO<strong>8 segundos</strong></span><span>APRESENTADOR<strong>Lucas Almeida</strong></span></div></details><div className="transcript-box"><span>TRECHO TRANSCRITO · IMPROVISO</span><p>“É quem depende do transporte público sabe como essa espera faz diferença no dia a dia.”</p></div><p className="tiny muted">ROTEIRO RETOMADO · LINHA 19:07:27</p><p className="review-quote">O serviço começa na próxima segunda-feira, com viagens a cada quinze minutos nos horários de pico.</p></article>
           <article className="panel note-panel"><h3>Anotação do operador</h3><textarea value={operatorNote} onChange={e=>setOperatorNote(e.target.value)} /><div className="note-actions"><span className="success-text">● Anotação editável</span><div><button className="secondary" onClick={()=>alert('Exportação demonstrativa: conecte um backend para gerar o arquivo.')}>↓ Exportar registro</button><button className="primary" onClick={()=>setReviewed(true)}>✓ Salvar revisão</button></div></div></article></> : <div className="panel review-empty" role="status"><strong>Nenhum improviso para esta matéria</strong><p>Não há registros nesta prévia para “{filter}”. Selecione outra matéria ou escolha “Todas as matérias”.</p></div>}</section></div>
     </main>}
 
     {tab === 'Leitura ampliada' && <main className="page-wrap expanded-wrap">
       <div className="page-title"><div><p className="eyebrow">MODO DO APRESENTADOR</p><h1>Leitura ampliada</h1><p>Modo de manipulador · Controles essenciais sempre visíveis.</p></div><span className="pill green">● Demonstração</span></div>
-      <div className="expanded-grid"><section className="panel expanded-script"><div className="prompter-head"><div><span className="pill green">● No ar · {story.code}</span><span className="pill editorial-category">{story.category} · Tom {story.tone}</span><strong>{story.headline}</strong></div><span className="page-count">Página {pageIndex + 1} de {story.pages.length}</span></div><div className="expanded-reading"><span className="script-label">PONTO DE LEITURA · FONTE {fontSize} PX</span>{story.alertLevel && story.alertLevel !== 'none' && <div className={`editorial-alert compact ${story.alertLevel}`}><strong>{story.alertLevel === 'critical' ? 'ALERTA EDITORIAL IMPORTANTE' : 'ATENÇÃO EDITORIAL'}</strong><p>{story.guidance}</p></div>}<h2 style={{fontSize: `${fontSize}px`}}>{page.text}</h2>{page.secondary && <p>{page.secondary}</p>}</div><div className="expanded-bottom"><span>À SEGUIR</span>{nextStory ? <><strong>{nextStory.headline}</strong><span>{nextStory.category} · {nextStory.tone}</span></> : <strong>Fim do espelho</strong>}<span>{globalPage}/{totalPages}</span></div></section><aside className="panel expanded-monitor"><details><summary><span>Monitor de operação</span><span className="pill green">● Escuta ativa · exemplo</span></summary><div className="expanded-monitor-details"><p className="muted">Lucas Almeida · Microfone 01</p><div className="waveform">{Array.from({length:24},(_,i)=><i key={i} style={{height:`${8+Math.abs(Math.sin(i*1.4))*22}px`}} />)}</div><hr/><h3>iNEWS</h3><span className="pill green">● Sincronizado · v12</span><p className="tiny muted">Jornal da Noite · Bloco A</p><div className="notice warning">1 improviso registrado<p>19:07:18–19:07:26 · A03</p><button className="secondary small" onClick={()=>setTab('Improvisos')}>Ver registro</button></div></div></details><button className="secondary full expanded-exit" onClick={()=>setTab('Operação ao vivo')}>Sair da leitura ampliada</button></aside></div>
+      <div className="expanded-grid"><section className="panel expanded-script"><div className="prompter-head"><div><span className="pill green">● No ar · {story.code}</span><span className="pill editorial-category">{story.category} · Tom {story.tone}</span><strong>{story.headline}</strong></div><span className="page-count">Página {pageIndex + 1} de {story.pages.length}</span></div><div className="expanded-reading"><span className="script-label">PONTO DE LEITURA · FONTE {fontSize} PX</span>{story.alertLevel && story.alertLevel !== 'none' && <div className={`editorial-alert compact ${story.alertLevel}`}><strong>{story.alertLevel === 'critical' ? 'ALERTA EDITORIAL IMPORTANTE' : 'ATENÇÃO EDITORIAL'}</strong><p>{story.guidance}</p></div>}<div className="retranque" style={{fontSize:`${fontSize}px`}}>{page.title}</div><div style={{fontSize:`${fontSize}px`}}><ScriptText className="script-content" html={page.bodyHtml} text={page.text} /></div>{page.secondary && <div style={{fontSize:`${fontSize}px`}}><ScriptText className="script-content" html={page.secondaryHtml} text={page.secondary} /></div>}</div><div className="expanded-bottom"><span>À SEGUIR</span>{nextStory ? <><strong>{nextStory.headline}</strong><span>{nextStory.category} · {nextStory.tone}</span></> : <strong>Fim do espelho</strong>}<span>{globalPage}/{totalPages}</span></div></section><aside className="panel expanded-monitor"><div className="notice">Operação manual<p>Roteiro e controles disponíveis nesta sessão. O avanço automático por reconhecimento de voz ainda não faz parte desta versão.</p></div><button className="secondary full expanded-exit" onClick={() => setTab('Apresentador')}>Voltar à leitura</button></aside></div>
     </main>}
 
     {tab === 'Apresentador' && <main className="presenter-mode" style={{ backgroundColor: preferences.highContrast ? '#000000' : preferences.backgroundColor, color: preferences.highContrast ? '#ffffff' : preferences.textColor, fontFamily: preferences.fontFamily }}>
@@ -449,16 +579,16 @@ function App() {
       <section className="presenter-stage">
         <div className="presenter-meta"><span>{story.category.toUpperCase()} · TOM: {story.tone.toUpperCase()} · {page.label}</span><span>Página {pageIndex + 1} de {story.pages.length}</span></div>
         {story.alertLevel && story.alertLevel !== 'none' && <div className={`presenter-editorial-alert ${story.alertLevel}`} role="status"><strong>{story.category}: {story.tone}</strong><span>{story.guidance}</span></div>}
-        <div className={`presenter-reading ${preferences.highContrast ? 'high-contrast-reading' : ''}`} ref={presenterTextRef} aria-label="Texto do teleprompter" tabIndex={0} style={{ backgroundColor: preferences.highContrast ? '#000000' : preferences.backgroundColor, color: preferences.highContrast ? '#ffffff' : preferences.textColor, fontFamily: preferences.fontFamily, borderColor: preferences.highContrast ? '#ffffff' : undefined }}>
+        <div className={`presenter-reading ${preferences.highContrast ? 'high-contrast-reading' : ''}`} ref={presenterTextRef} onScroll={handlePresenterScroll} aria-label="Texto do teleprompter" tabIndex={0} style={{ backgroundColor: preferences.highContrast ? '#000000' : preferences.backgroundColor, color: preferences.highContrast ? '#ffffff' : preferences.textColor, fontFamily: preferences.fontFamily, borderColor: preferences.highContrast ? '#ffffff' : undefined }}>
           <div className="presenter-reading-inner">
-            <h1 style={{ color: preferences.highContrast ? '#ffffff' : preferences.textColor }}>{story.headline}</h1>
-            <h2 style={{fontSize: `${fontSize}px`, color: preferences.highContrast ? '#ffffff' : preferences.textColor, borderLeftColor: preferences.highContrast ? '#ffff00' : '#655cf6'}}>{page.text}</h2>
-            {page.secondary && <p style={{fontSize: `${Math.max(18, fontSize * 0.62)}px`, color: preferences.highContrast ? '#ffffff' : preferences.textColor}}>{page.secondary}</p>}
+            <div className="presenter-rundown-title" style={{ fontSize: `${fontSize}px` }}>{story.headline} · {page.title}</div>
+            <div className="presenter-copy" style={{ fontSize: `${fontSize}px` }}><ScriptText className="script-content" html={page.bodyHtml} text={page.text} /></div>
+            {page.secondary && <div className="presenter-copy" style={{ fontSize: `${fontSize}px` }}><ScriptText className="script-content" html={page.secondaryHtml} text={page.secondary} /></div>}
             {page.keywords.length > 0 && <p className="presenter-cue">Próximas referências: {page.keywords.join(' · ')}</p>}
           </div>
         </div>
         <div className="presenter-progress-label"><span>Progresso do roteiro</span><span>{globalPage} / {totalPages} páginas</span></div>
-        <div className="presenter-progress"><span style={{width: `${globalPage / totalPages * 100}%`}} /></div>
+        <div className="presenter-progress"><span style={{width: `${progressPercent}%`}} /></div>
       </section>
       <section className="presenter-next-story" aria-label="Prévia da próxima matéria">
         <span className="tiny muted">A SEGUIR · PRÉVIA DA PRÓXIMA MATÉRIA</span>
@@ -467,6 +597,7 @@ function App() {
       <section className="presenter-controls" aria-label="Controles do teleprompter">
         <div className="presenter-transport">
           <button className="secondary" onClick={previousPage}>← Anterior</button>
+          <div className="manual-scroll-controls"><button className="secondary" onClick={() => moveReadingPoint(-220)} aria-label="Rolar o texto para cima">↑ Texto</button><button className="secondary" onClick={() => moveReadingPoint(220)} aria-label="Rolar o texto para baixo">↓ Texto</button></div>
           <button className="primary presenter-pause" onClick={toggleReading}>{paused ? '▶ Retomar leitura' : 'Ⅱ Pausar leitura'}</button>
           <button className="secondary" onClick={nextPage}>Próxima →</button>
         </div>
@@ -477,7 +608,7 @@ function App() {
       <p className="presenter-hint">Leitura e navegação funcionam localmente, sem IA ou conexão externa. Atalhos: Espaço pausa/retoma · ← página anterior · → próxima página · +/− tamanho do texto · Esc fecha a personalização.</p>
     </main>}
 
-    {tab !== 'Apresentador' && <footer className="app-footer"><span>Protótipo estático · Estados de iNEWS e áudio são simulados</span><span>Operador: Mariana Costa · Estação OP-02</span></footer>}
+    {tab !== 'Apresentador' && <footer className="app-footer"><span>Controles manuais disponíveis · sincronização da sessão em tempo real</span><span>Operador: Mariana Costa · Estação OP-02</span></footer>}
     {showExpanded && <div className="modal-backdrop" role="presentation" onClick={()=>setShowExpanded(false)}><section className="modal panel" role="dialog" aria-modal="true" aria-label="Prévia de leitura ampliada" onClick={e=>e.stopPropagation()}><div className="panel-heading"><h2>Prévia da leitura ampliada</h2><button className="secondary" onClick={()=>setShowExpanded(false)}>Fechar ×</button></div><h3>{story.headline}</h3><p style={{fontSize:`${fontSize}px`,lineHeight:1.35}}>{page.text}</p><button className="primary" onClick={()=>{setTab('Leitura ampliada');setShowExpanded(false)}}>Abrir modo ampliado</button></section></div>}
   </div>
 }
