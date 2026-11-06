@@ -12,6 +12,90 @@ const PREFERENCES_KEY = 'teleprompter-reading-preferences-v1'
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const SESSION_ID = new URLSearchParams(window.location.search).get('session') || 'demo'
 const categories: Story['category'][] = ['Cidade', 'Previsão do tempo', 'Economia', 'Política', 'Cultura', 'Notícia séria', 'Falecimento', 'Conteúdo leve']
+const LIVE_AUDIO_SAMPLE_RATE = 24000
+const LIVE_AUDIO_MAX_SEGMENT_SECONDS = 5
+
+type ScriptWord = { normalized: string; end: number }
+type LiveSpeechAssessment = {
+  message: string
+  kind: 'waiting' | 'match' | 'omission' | 'repetition' | 'resumption' | 'improviso'
+}
+
+function getScriptWords(text: string): ScriptWord[] {
+  return Array.from(text.matchAll(/[\p{L}\p{N}]+/gu), match => ({
+    normalized: match[0].normalize('NFD').replace(/\p{M}/gu, '').toLowerCase(),
+    end: (match.index ?? 0) + match[0].length
+  }))
+}
+
+function findScriptMatch(script: string, transcript: string, searchFrom: number) {
+  const scriptWords = getScriptWords(script)
+  const spokenWords = getScriptWords(transcript).slice(-12)
+  const longestMatch = Math.min(8, spokenWords.length)
+  if (longestMatch < 4 || scriptWords.length === 0) return null
+
+  for (let length = longestMatch; length >= 4; length--) {
+    const phrase = spokenWords.slice(-length).map(word => word.normalized)
+    const candidates: Array<{ startWord: number; word: number; totalWords: number; length: number; differences: number }> = []
+    for (let start = 0; start <= scriptWords.length - length; start++) {
+      let differences = 0
+      for (let offset = 0; offset < length; offset++) {
+        if (scriptWords[start + offset].normalized !== phrase[offset]) differences++
+      }
+      const allowedDifferences = length >= 6 ? 1 : 0
+      const endWord = start + length
+      if (differences <= allowedDifferences) {
+        candidates.push({
+          startWord: start,
+          word: endWord,
+          totalWords: scriptWords.length,
+          length,
+          differences
+        })
+      }
+    }
+    if (candidates.length === 0) continue
+    candidates.sort((left, right) => {
+      const leftBehind = left.word < searchFrom - 2
+      const rightBehind = right.word < searchFrom - 2
+      if (leftBehind !== rightBehind) return leftBehind ? 1 : -1
+      if (left.differences !== right.differences) return left.differences - right.differences
+      return Math.abs(left.startWord - searchFrom) - Math.abs(right.startWord - searchFrom)
+    })
+    const best = candidates[0]
+    return {
+      startWord: best.startWord,
+      word: best.word,
+      totalWords: best.totalWords,
+      length: best.length
+    }
+  }
+  return null
+}
+
+function encodePcm16Base64(input: Float32Array, inputSampleRate: number) {
+  const ratio = inputSampleRate / LIVE_AUDIO_SAMPLE_RATE
+  const outputLength = Math.floor(input.length / ratio)
+  if (outputLength === 0) return { audio: '', samples: 0 }
+
+  const bytes = new Uint8Array(outputLength * 2)
+  const data = new DataView(bytes.buffer)
+  for (let index = 0; index < outputLength; index++) {
+    const sourceIndex = index * ratio
+    const lowerIndex = Math.floor(sourceIndex)
+    const upperIndex = Math.min(lowerIndex + 1, input.length - 1)
+    const fraction = sourceIndex - lowerIndex
+    const sample = input[lowerIndex] * (1 - fraction) + input[upperIndex] * fraction
+    const pcm = Math.max(-1, Math.min(1, sample))
+    data.setInt16(index * 2, pcm < 0 ? pcm * 0x8000 : pcm * 0x7fff, true)
+  }
+
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+  return { audio: btoa(binary), samples: outputLength }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -61,6 +145,47 @@ function App() {
   const [importFileName, setImportFileName] = useState('')
   const [importStatus, setImportStatus] = useState('')
   const [importing, setImporting] = useState(false)
+  const [audioFile, setAudioFile] = useState<File | null>(null)
+  const [recording, setRecording] = useState(false)
+  const [audioTranscript, setAudioTranscript] = useState('')
+  const [transcriptionStatus, setTranscriptionStatus] = useState('')
+  const [transcribing, setTranscribing] = useState(false)
+  const [liveTranscribing, setLiveTranscribing] = useState(false)
+  const [liveFinalizing, setLiveFinalizing] = useState(false)
+  const [liveTranscriptionStatus, setLiveTranscriptionStatus] = useState('')
+  const [liveTranscript, setLiveTranscript] = useState('')
+  const [liveInputLevel, setLiveInputLevel] = useState(0)
+  const [liveSpeechAssessment, setLiveSpeechAssessment] = useState<LiveSpeechAssessment>({
+    message: 'A fala reconhecida aparecerá aqui quando você iniciar o microfone.',
+    kind: 'waiting'
+  })
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const recordingChunksRef = useRef<Blob[]>([])
+  const liveTranscriptionSocketRef = useRef<WebSocket | null>(null)
+  const liveAudioContextRef = useRef<AudioContext | null>(null)
+  const liveAudioStreamRef = useRef<MediaStream | null>(null)
+  const liveAudioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
+  const liveAudioProcessorRef = useRef<ScriptProcessorNode | null>(null)
+  const liveAudioGainRef = useRef<GainNode | null>(null)
+  const liveTranscriptionReadyRef = useRef(false)
+  const liveTranscribingRef = useRef(false)
+  const liveFinalizingRef = useRef(false)
+  const liveStopTimerRef = useRef<number | null>(null)
+  const liveSamplesInTurnRef = useRef(0)
+  const liveSilenceSamplesRef = useRef(0)
+  const liveTurnHasSpeechRef = useRef(false)
+  const livePreRollChunksRef = useRef<Array<{ audio: string; samples: number }>>([])
+  const livePreRollSamplesRef = useRef(0)
+  const liveAudioLevelUpdateAtRef = useRef(0)
+  const liveItemOrderRef = useRef<string[]>([])
+  const liveItemTranscriptsRef = useRef<Record<string, string>>({})
+  const livePendingItemIdsRef = useRef<Set<string>>(new Set())
+  const liveCompletedItemIdsRef = useRef<Set<string>>(new Set())
+  const liveStopWaitingForCommitRef = useRef(false)
+  const liveLastEvaluatedSpeechRef = useRef('')
+  const alignmentCursorRef = useRef(0)
+  const alignmentTargetRef = useRef('')
   const [speed, setSpeed] = useState(() => { try { const saved = localStorage.getItem(PREFERENCES_KEY); return saved ? Number(JSON.parse(saved).speed) || 1 : 1 } catch { return 1 } })
   const [fontSize, setFontSize] = useState(() => { try { const saved = localStorage.getItem(PREFERENCES_KEY); return saved ? Number(JSON.parse(saved).fontSize) || 36 : 36 } catch { return 36 } })
   const [preferences, setPreferences] = useState<ReadingPreferences>(() => { try { const saved = localStorage.getItem(PREFERENCES_KEY); if (saved) { const parsed = JSON.parse(saved); return { ...DEFAULT_PREFERENCES, ...parsed.preferences } } } catch { /* usa os padrões */ } return DEFAULT_PREFERENCES })
@@ -90,6 +215,28 @@ function App() {
     operatorOverride,
     readingPreferences: preferences
   })
+
+  useEffect(() => () => {
+    const recorder = mediaRecorderRef.current
+    if (recorder) {
+      recorder.ondataavailable = null
+      recorder.onstop = null
+      recorder.onerror = null
+      if (recorder.state !== 'inactive') recorder.stop()
+    }
+    mediaStreamRef.current?.getTracks().forEach(track => track.stop())
+    liveTranscribingRef.current = false
+    if (liveStopTimerRef.current !== null) window.clearTimeout(liveStopTimerRef.current)
+    liveAudioProcessorRef.current?.disconnect()
+    liveAudioSourceRef.current?.disconnect()
+    liveAudioGainRef.current?.disconnect()
+    liveAudioStreamRef.current?.getTracks().forEach(track => track.stop())
+    const liveAudioContext = liveAudioContextRef.current
+    if (liveAudioContext && liveAudioContext.state !== 'closed') {
+      void liveAudioContext.close().catch(error => console.error('Falha ao encerrar o áudio em tempo real.', error))
+    }
+    liveTranscriptionSocketRef.current?.close()
+  }, [])
 
   function applyRemoteState(state: RealtimeState) {
     if (!Array.isArray(state.editorialStories) || state.editorialStories.length === 0) {
@@ -302,6 +449,7 @@ function App() {
     : 0
 
   function takeManualControl() {
+    if (liveTranscribingRef.current) stopLiveTranscription()
     sendCommand('take_control')
     setOperatorOverride(true)
     setPaused(true)
@@ -324,6 +472,7 @@ function App() {
     element.scrollTop += amount
   }
   function toggleReading() {
+    if (liveTranscribingRef.current) stopLiveTranscription()
     setOperatorOverride(true)
     sendCommand(paused ? 'resume' : 'pause')
     setPaused(value => !value)
@@ -432,6 +581,601 @@ function App() {
     }
   }
 
+  async function transcribeAudio() {
+    if (!audioFile) return
+    setTranscribing(true)
+    setTranscriptionStatus('')
+    try {
+      const formData = new FormData()
+      formData.append('audio', audioFile)
+      const response = await fetch(`${API_URL}/api/transcriptions`, {
+        method: 'POST',
+        body: formData
+      })
+      const result = await response.json() as { detail?: string; text?: string }
+      if (!response.ok) throw new Error(result.detail || `Falha na transcrição (HTTP ${response.status}).`)
+      if (typeof result.text !== 'string') throw new Error('A API retornou uma transcrição inválida.')
+      setAudioTranscript(result.text)
+      setTranscriptionStatus('Transcrição concluída. Revise o texto antes de aplicá-lo ao roteiro.')
+    } catch (error) {
+      setTranscriptionStatus(error instanceof Error ? error.message : 'Falha ao transcrever o áudio.')
+    } finally {
+      setTranscribing(false)
+    }
+  }
+
+  function currentAlignmentScript() {
+    const state = latestStateRef.current
+    const currentStory = state.editorialStories[state.selectedStory]
+    const currentPage = currentStory?.pages[state.pageIndex]
+    if (!currentStory || !currentPage) return null
+    return {
+      key: `${currentStory.id}:${currentPage.id}`,
+      text: [currentStory.headline, currentPage.title, currentPage.text, currentPage.secondary ?? ''].join(' ')
+    }
+  }
+
+  function updateLiveTranscriptAlignment() {
+    const itemIds = [...new Set([...liveItemOrderRef.current, ...Object.keys(liveItemTranscriptsRef.current)])]
+    const transcript = itemIds.map(id => liveItemTranscriptsRef.current[id] ?? '').join(' ').trim()
+    setLiveTranscript(transcript.slice(-1800))
+
+    const spoken = liveItemTranscriptsRef.current[itemIds.at(-1) ?? '']?.trim()
+    const spokenWords = spoken ? getScriptWords(spoken) : []
+    if (!spoken) return
+    if (spokenWords.length < 4) {
+      setLiveSpeechAssessment({
+        message: 'Fala reconhecida; aguardando mais palavras para identificar o trecho.',
+        kind: 'waiting'
+      })
+      return
+    }
+    const speechKey = `${itemIds.at(-1)}:${spoken}`
+    if (liveLastEvaluatedSpeechRef.current === speechKey) return
+    liveLastEvaluatedSpeechRef.current = speechKey
+
+    const state = latestStateRef.current
+    const selectedStory = state.editorialStories[state.selectedStory]
+    if (!selectedStory) return
+
+    const makeTarget = (storyIndex: number, targetPageIndex: number) => {
+      const targetStory = state.editorialStories[storyIndex]
+      const targetPage = targetStory?.pages[targetPageIndex]
+      if (!targetStory || !targetPage) return null
+      return {
+        storyIndex,
+        pageIndex: targetPageIndex,
+        story: targetStory,
+        page: targetPage,
+        key: `${targetStory.id}:${targetPage.id}`,
+        text: [targetStory.headline, targetPage.title, targetPage.text, targetPage.secondary ?? ''].join(' ')
+      }
+    }
+
+    const currentTarget = makeTarget(state.selectedStory, state.pageIndex)
+    if (!currentTarget) return
+    if (alignmentTargetRef.current !== currentTarget.key) {
+      alignmentTargetRef.current = currentTarget.key
+      alignmentCursorRef.current = Math.floor(
+        getScriptWords(currentTarget.text).length * state.scrollPosition
+      )
+    }
+
+    const currentMatch = findScriptMatch(currentTarget.text, spoken, alignmentCursorRef.current)
+      ?? findScriptMatch(currentTarget.text, spoken, 0)
+    if (currentMatch && currentMatch.length >= 5) {
+      const readCursor = alignmentCursorRef.current
+      const repeatedBehindCursor = currentMatch.word < readCursor - 2
+      const skippedWords = currentMatch.startWord - readCursor
+      if (repeatedBehindCursor) {
+        setLiveSpeechAssessment({
+          message: `Possível repetição de um trecho já lido · ${selectedStory.headline} · ${currentTarget.page.label}`,
+          kind: 'repetition'
+        })
+      } else {
+        alignmentCursorRef.current = currentMatch.word
+        setScrollPosition(Math.min(1, currentMatch.word / currentMatch.totalWords))
+        if (skippedWords >= 8) {
+          setLiveSpeechAssessment({
+            message: `Possível omissão de cerca de ${skippedWords} palavras; retomei no trecho reconhecido · ${selectedStory.headline}`,
+            kind: 'omission'
+          })
+        } else {
+          setLiveSpeechAssessment({
+            message: `Acompanhando o roteiro · ${selectedStory.headline} · ${currentTarget.page.label}`,
+            kind: 'match'
+          })
+        }
+      }
+      return
+    }
+
+    for (let previousPageIndex = 0; previousPageIndex < state.pageIndex; previousPageIndex++) {
+      const target = makeTarget(state.selectedStory, previousPageIndex)
+      const match = target && findScriptMatch(target.text, spoken, 0)
+      if (!target || !match || match.length < 5) continue
+      setPageIndex(target.pageIndex)
+      setScrollPosition(Math.min(1, match.word / match.totalWords))
+      alignmentTargetRef.current = target.key
+      alignmentCursorRef.current = match.word
+      setLiveSpeechAssessment({
+        message: `Retomada identificada · ${selectedStory.headline} · ${target.page.label}`,
+        kind: 'resumption'
+      })
+      return
+    }
+
+    for (let nextPageIndex = state.pageIndex + 1; nextPageIndex < selectedStory.pages.length; nextPageIndex++) {
+      const target = makeTarget(state.selectedStory, nextPageIndex)
+      const match = target && findScriptMatch(target.text, spoken, 0)
+      if (!target || !match || match.length < 5) continue
+      setPageIndex(target.pageIndex)
+      setScrollPosition(Math.min(1, match.word / match.totalWords))
+      alignmentTargetRef.current = target.key
+      alignmentCursorRef.current = match.word
+      setLiveSpeechAssessment({
+        message: `Continuação identificada · ${selectedStory.headline} · ${target.page.label}`,
+        kind: 'match'
+      })
+      return
+    }
+
+    let otherStoryMatch: {
+      storyIndex: number
+      pageIndex: number
+      story: Story
+      page: Story['pages'][number]
+      key: string
+      match: NonNullable<ReturnType<typeof findScriptMatch>>
+    } | null = null
+    for (let storyIndex = 0; storyIndex < state.editorialStories.length; storyIndex++) {
+      if (storyIndex === state.selectedStory) continue
+      const otherStory = state.editorialStories[storyIndex]
+      for (let targetPageIndex = 0; targetPageIndex < otherStory.pages.length; targetPageIndex++) {
+        const target = makeTarget(storyIndex, targetPageIndex)
+        const match = target && findScriptMatch(target.text, spoken, 0)
+        if (target && match && match.length >= 6 && (!otherStoryMatch || match.length > otherStoryMatch.match.length)) {
+          otherStoryMatch = { ...target, match }
+        }
+      }
+    }
+    if (otherStoryMatch) {
+      setSelectedStory(otherStoryMatch.storyIndex)
+      setPageIndex(otherStoryMatch.pageIndex)
+      setScrollPosition(Math.min(1, otherStoryMatch.match.word / otherStoryMatch.match.totalWords))
+      setOperatorOverride(true)
+      alignmentTargetRef.current = otherStoryMatch.key
+      alignmentCursorRef.current = otherStoryMatch.match.word
+      setLiveSpeechAssessment({
+        message: `Outro roteiro identificado e selecionado · ${otherStoryMatch.story.headline} · ${otherStoryMatch.page.label}`,
+        kind: 'match'
+      })
+      return
+    }
+
+    if (currentMatch) {
+      alignmentCursorRef.current = currentMatch.word
+      setScrollPosition(Math.min(1, currentMatch.word / currentMatch.totalWords))
+      setLiveSpeechAssessment({
+        message: `Trecho compatível com o roteiro selecionado · ${selectedStory.headline} · ${currentTarget.page.label}`,
+        kind: 'match'
+      })
+      return
+    }
+
+    setLiveSpeechAssessment({
+      message: spokenWords.length >= 5
+        ? 'Fala fora dos roteiros carregados · possível improviso'
+        : 'Fala reconhecida; aguardando mais palavras para identificar o trecho.',
+      kind: spokenWords.length >= 5 ? 'improviso' : 'waiting'
+    })
+  }
+
+  function closeLiveSocketAfterFinalTranscription() {
+    if (
+      liveTranscribingRef.current ||
+      !liveFinalizingRef.current ||
+      liveStopWaitingForCommitRef.current ||
+      livePendingItemIdsRef.current.size > 0
+    ) return
+    if (liveStopTimerRef.current !== null) {
+      window.clearTimeout(liveStopTimerRef.current)
+      liveStopTimerRef.current = null
+    }
+    liveTranscriptionSocketRef.current?.close()
+  }
+
+  function setupLiveAudioCapture() {
+    const stream = liveAudioStreamRef.current
+    const audioContext = liveAudioContextRef.current
+    const socket = liveTranscriptionSocketRef.current
+    if (!stream || !audioContext || !socket || liveAudioProcessorRef.current) return
+
+    const source = audioContext.createMediaStreamSource(stream)
+    const processor = audioContext.createScriptProcessor(4096, 1, 1)
+    const silentGain = audioContext.createGain()
+    silentGain.gain.value = 0
+    processor.onaudioprocess = event => {
+      const input = event.inputBuffer.getChannelData(0)
+      const output = event.outputBuffer.getChannelData(0)
+      output.fill(0)
+
+      if (!liveTranscribingRef.current || !liveTranscriptionReadyRef.current || socket.readyState !== WebSocket.OPEN) return
+      const encoded = encodePcm16Base64(input, audioContext.sampleRate)
+      if (!encoded.audio) return
+
+      let sumSquares = 0
+      for (let index = 0; index < input.length; index++) sumSquares += input[index] * input[index]
+      const inputLevel = Math.sqrt(sumSquares / input.length)
+      const hasVoice = inputLevel >= 0.012
+      const now = performance.now()
+      if (now - liveAudioLevelUpdateAtRef.current >= 200) {
+        liveAudioLevelUpdateAtRef.current = now
+        setLiveInputLevel(Math.min(100, Math.round(inputLevel * 500)))
+      }
+
+      if (hasVoice) {
+        if (!liveTurnHasSpeechRef.current) {
+          for (const chunk of livePreRollChunksRef.current) {
+            socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: chunk.audio }))
+            liveSamplesInTurnRef.current += chunk.samples
+          }
+          livePreRollChunksRef.current = []
+          livePreRollSamplesRef.current = 0
+        }
+        liveTurnHasSpeechRef.current = true
+        liveSilenceSamplesRef.current = 0
+        socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: encoded.audio }))
+        liveSamplesInTurnRef.current += encoded.samples
+      } else if (liveTurnHasSpeechRef.current) {
+        socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: encoded.audio }))
+        liveSamplesInTurnRef.current += encoded.samples
+        liveSilenceSamplesRef.current += encoded.samples
+      } else {
+        livePreRollChunksRef.current.push(encoded)
+        livePreRollSamplesRef.current += encoded.samples
+        while (livePreRollSamplesRef.current > LIVE_AUDIO_SAMPLE_RATE * 0.3) {
+          const removed = livePreRollChunksRef.current.shift()
+          if (!removed) break
+          livePreRollSamplesRef.current -= removed.samples
+        }
+      }
+
+      const reachedSpeechPause = liveTurnHasSpeechRef.current &&
+        liveSilenceSamplesRef.current >= LIVE_AUDIO_SAMPLE_RATE * 0.8
+      const reachedProgressInterval = liveSamplesInTurnRef.current >=
+        LIVE_AUDIO_SAMPLE_RATE * LIVE_AUDIO_MAX_SEGMENT_SECONDS
+      if (reachedSpeechPause || reachedProgressInterval) {
+        socket.send(JSON.stringify({ type: 'input_audio_buffer.commit' }))
+        liveSamplesInTurnRef.current = 0
+        liveSilenceSamplesRef.current = 0
+        liveTurnHasSpeechRef.current = false
+        livePreRollChunksRef.current = []
+        livePreRollSamplesRef.current = 0
+      }
+    }
+
+    source.connect(processor)
+    processor.connect(silentGain)
+    silentGain.connect(audioContext.destination)
+    liveAudioSourceRef.current = source
+    liveAudioProcessorRef.current = processor
+    liveAudioGainRef.current = silentGain
+    liveTranscriptionReadyRef.current = true
+    setLiveTranscriptionStatus(`Microfone ativo. O ponto do roteiro atualiza por trechos de até ${LIVE_AUDIO_MAX_SEGMENT_SECONDS} segundos, sem desligar o microfone.`)
+  }
+
+  function releaseLiveAudio() {
+    liveTranscriptionReadyRef.current = false
+    const processor = liveAudioProcessorRef.current
+    if (processor) {
+      processor.onaudioprocess = null
+      processor.disconnect()
+      liveAudioProcessorRef.current = null
+    }
+    liveAudioSourceRef.current?.disconnect()
+    liveAudioSourceRef.current = null
+    liveAudioGainRef.current?.disconnect()
+    liveAudioGainRef.current = null
+    liveAudioStreamRef.current?.getTracks().forEach(track => track.stop())
+    liveAudioStreamRef.current = null
+    setLiveInputLevel(0)
+    const audioContext = liveAudioContextRef.current
+    liveAudioContextRef.current = null
+    if (audioContext && audioContext.state !== 'closed') {
+      void audioContext.close().catch(error => console.error('Falha ao encerrar o áudio em tempo real.', error))
+    }
+  }
+
+  async function startLiveTranscription() {
+    if (liveTranscribingRef.current) return
+    if (liveFinalizing) {
+      setLiveTranscriptionStatus('Aguardando a última transcrição ser concluída.')
+      return
+    }
+    if (recording || transcribing) {
+      setLiveTranscriptionStatus('Encerre a gravação ou transcrição de arquivo antes de iniciar o acompanhamento ao vivo.')
+      return
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof AudioContext === 'undefined') {
+      setLiveTranscriptionStatus('Este navegador não oferece captura de áudio. Tente uma versão atualizada em HTTPS ou localhost.')
+      return
+    }
+
+    liveTranscribingRef.current = true
+    setLiveTranscribing(true)
+    setLiveTranscript('')
+    setLiveInputLevel(0)
+    setLiveTranscriptionStatus('Aguardando permissão do microfone…')
+    liveItemOrderRef.current = []
+    liveItemTranscriptsRef.current = {}
+    liveLastEvaluatedSpeechRef.current = ''
+    setLiveSpeechAssessment({
+      message: 'Microfone conectado. Aguardando a primeira fala…',
+      kind: 'waiting'
+    })
+    livePendingItemIdsRef.current.clear()
+    liveCompletedItemIdsRef.current.clear()
+    liveStopWaitingForCommitRef.current = false
+    liveFinalizingRef.current = false
+    setLiveFinalizing(false)
+    liveSamplesInTurnRef.current = 0
+    liveSilenceSamplesRef.current = 0
+    liveTurnHasSpeechRef.current = false
+    livePreRollChunksRef.current = []
+    livePreRollSamplesRef.current = 0
+    alignmentTargetRef.current = ''
+    alignmentCursorRef.current = 0
+    if (liveStopTimerRef.current !== null) {
+      window.clearTimeout(liveStopTimerRef.current)
+      liveStopTimerRef.current = null
+    }
+
+    try {
+      let audioContext: AudioContext
+      try {
+        audioContext = new AudioContext({ sampleRate: LIVE_AUDIO_SAMPLE_RATE })
+      } catch {
+        audioContext = new AudioContext()
+      }
+      liveAudioContextRef.current = audioContext
+      void audioContext.resume().catch(error => console.error('Não foi possível iniciar o áudio do microfone.', error))
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (!liveTranscribingRef.current) {
+        stream.getTracks().forEach(track => track.stop())
+        return
+      }
+      liveAudioStreamRef.current = stream
+      if (audioContext.state !== 'running') await audioContext.resume()
+      if (!liveTranscribingRef.current) {
+        releaseLiveAudio()
+        return
+      }
+
+      const socketUrl = new URL(`/ws/${encodeURIComponent(SESSION_ID)}/transcription`, API_URL)
+      socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+      const socket = new WebSocket(socketUrl)
+      liveTranscriptionSocketRef.current = socket
+      socket.onopen = () => setLiveTranscriptionStatus('Conectado. Preparando a transcrição em tempo real…')
+      socket.onmessage = event => {
+        if (liveTranscriptionSocketRef.current !== socket) return
+        let message: {
+          type?: string
+          item_id?: string
+          delta?: string
+          transcript?: string
+          message?: string
+          error?: { message?: string }
+        }
+        try {
+          message = JSON.parse(event.data) as typeof message
+        } catch {
+          setLiveTranscriptionStatus('O backend enviou um evento de transcrição inválido.')
+          return
+        }
+
+        if (message.type === 'session.updated' || message.type === 'transcription_session.updated') {
+          if (liveTranscriptionReadyRef.current) return
+          try {
+            const currentScript = currentAlignmentScript()
+            if (currentScript) {
+              alignmentTargetRef.current = currentScript.key
+              alignmentCursorRef.current = Math.floor(getScriptWords(currentScript.text).length * latestStateRef.current.scrollPosition)
+            }
+            setPaused(true)
+            setOperatorOverride(true)
+            sendCommand('pause')
+            setupLiveAudioCapture()
+          } catch (error) {
+            setLiveTranscriptionStatus(error instanceof Error ? error.message : 'Não foi possível iniciar a captura de áudio.')
+            stopLiveTranscription()
+          }
+        } else if (message.type === 'input_audio_buffer.committed' && message.item_id) {
+          setLiveTranscriptionStatus('Trecho enviado para transcrição; o microfone continua ativo.')
+          if (!liveItemOrderRef.current.includes(message.item_id)) liveItemOrderRef.current.push(message.item_id)
+          if (!liveCompletedItemIdsRef.current.has(message.item_id)) livePendingItemIdsRef.current.add(message.item_id)
+          if (liveStopWaitingForCommitRef.current) liveStopWaitingForCommitRef.current = false
+          closeLiveSocketAfterFinalTranscription()
+        } else if (message.type === 'transcription.started') {
+          setLiveTranscriptionStatus(
+            message.message || 'Trecho recebido. Transcrevendo localmente; aguarde o resultado…'
+          )
+        } else if (message.type === 'conversation.item.input_audio_transcription.delta' && message.item_id && message.delta) {
+          liveItemTranscriptsRef.current[message.item_id] =
+            (liveItemTranscriptsRef.current[message.item_id] ?? '') + message.delta
+          updateLiveTranscriptAlignment()
+        } else if (message.type === 'conversation.item.input_audio_transcription.completed' && message.item_id && typeof message.transcript === 'string') {
+          liveItemTranscriptsRef.current[message.item_id] = message.transcript
+          setLiveTranscriptionStatus(
+            message.transcript.trim()
+              ? 'Transcrição recebida; acompanhando o ponto do roteiro.'
+              : 'Trecho processado sem fala reconhecível. Confira o nível do microfone e tente falar mais perto.'
+          )
+          liveCompletedItemIdsRef.current.add(message.item_id)
+          livePendingItemIdsRef.current.delete(message.item_id)
+          if (!liveItemOrderRef.current.includes(message.item_id)) liveItemOrderRef.current.push(message.item_id)
+          while (liveItemOrderRef.current.length > 20) {
+            const oldestId = liveItemOrderRef.current.shift()
+            if (oldestId) {
+              delete liveItemTranscriptsRef.current[oldestId]
+              liveCompletedItemIdsRef.current.delete(oldestId)
+            }
+          }
+          updateLiveTranscriptAlignment()
+          closeLiveSocketAfterFinalTranscription()
+        } else if (message.type === 'error') {
+          const errorMessage = message.error?.message ?? message.message
+          setLiveTranscriptionStatus(errorMessage || 'O serviço local de transcrição retornou um erro.')
+          liveTranscribingRef.current = false
+          liveFinalizingRef.current = false
+          setLiveTranscribing(false)
+          setLiveFinalizing(false)
+          releaseLiveAudio()
+          socket.close()
+        }
+      }
+      socket.onerror = () => setLiveTranscriptionStatus('Falha na conexão com o serviço de transcrição.')
+      socket.onclose = () => {
+        if (liveTranscriptionSocketRef.current !== socket) return
+        const wasActive = liveTranscribingRef.current
+        liveTranscriptionSocketRef.current = null
+        releaseLiveAudio()
+        liveTranscribingRef.current = false
+        liveFinalizingRef.current = false
+        setLiveTranscribing(false)
+        setLiveFinalizing(false)
+        if (wasActive) setLiveTranscriptionStatus('A conexão foi encerrada. Inicie novamente para continuar o acompanhamento.')
+      }
+    } catch (error) {
+      liveTranscribingRef.current = false
+      liveFinalizingRef.current = false
+      setLiveTranscribing(false)
+      setLiveFinalizing(false)
+      releaseLiveAudio()
+      liveTranscriptionSocketRef.current?.close()
+      liveTranscriptionSocketRef.current = null
+      const message = error instanceof DOMException && error.name === 'NotAllowedError'
+        ? 'Acesso ao microfone negado. Permita o uso do microfone nas configurações do navegador.'
+        : error instanceof Error ? error.message : 'Não foi possível iniciar a transcrição em tempo real.'
+      setLiveTranscriptionStatus(message)
+    }
+  }
+
+  function stopLiveTranscription() {
+    if (!liveTranscribingRef.current) return
+    liveTranscribingRef.current = false
+    setLiveTranscribing(false)
+    const socket = liveTranscriptionSocketRef.current
+    const hasAudioToCommit = liveTurnHasSpeechRef.current && liveSamplesInTurnRef.current > 0
+    const shouldWaitForFinalTranscription = hasAudioToCommit || livePendingItemIdsRef.current.size > 0
+    liveFinalizingRef.current = shouldWaitForFinalTranscription
+    liveStopWaitingForCommitRef.current = hasAudioToCommit
+    setLiveFinalizing(shouldWaitForFinalTranscription)
+    if (hasAudioToCommit && socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'input_audio_buffer.commit' }))
+    }
+    liveSamplesInTurnRef.current = 0
+    liveTurnHasSpeechRef.current = false
+    livePreRollChunksRef.current = []
+    livePreRollSamplesRef.current = 0
+    releaseLiveAudio()
+    setLiveTranscriptionStatus(shouldWaitForFinalTranscription
+      ? 'Microfone encerrado. Aguardando a transcrição local; o primeiro trecho pode demorar…'
+      : 'Acompanhamento encerrado.')
+    if (liveStopTimerRef.current !== null) window.clearTimeout(liveStopTimerRef.current)
+    liveStopTimerRef.current = window.setTimeout(() => {
+      liveTranscriptionSocketRef.current?.close()
+      liveStopTimerRef.current = null
+    }, shouldWaitForFinalTranscription ? 180_000 : 0)
+  }
+
+  async function startAudioRecording() {
+    if (liveTranscribingRef.current) {
+      setTranscriptionStatus('Encerre o acompanhamento ao vivo antes de gravar um arquivo.')
+      return
+    }
+    if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      setTranscriptionStatus('Este navegador não oferece gravação de áudio. Tente uma versão atualizada em HTTPS ou localhost.')
+      return
+    }
+
+    let stream: MediaStream | null = null
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const supportedMimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+        .find(mimeType => MediaRecorder.isTypeSupported(mimeType))
+      const recorder = supportedMimeType
+        ? new MediaRecorder(stream, { mimeType: supportedMimeType })
+        : new MediaRecorder(stream)
+      const recordingMimeType = recorder.mimeType.toLowerCase()
+      if (!recordingMimeType.startsWith('audio/webm') && !recordingMimeType.startsWith('audio/mp4')) {
+        stream.getTracks().forEach(track => track.stop())
+        setTranscriptionStatus('Este navegador grava em um formato não compatível. Use Chrome, Edge ou Safari atualizado.')
+        return
+      }
+
+      mediaStreamRef.current = stream
+      mediaRecorderRef.current = recorder
+      recordingChunksRef.current = []
+      setAudioFile(null)
+      setAudioTranscript('')
+      setTranscriptionStatus('Gravando pelo microfone…')
+
+      recorder.ondataavailable = event => {
+        if (event.data.size > 0) recordingChunksRef.current.push(event.data)
+      }
+      recorder.onerror = () => {
+        recorder.onstop = null
+        mediaStreamRef.current?.getTracks().forEach(track => track.stop())
+        mediaStreamRef.current = null
+        mediaRecorderRef.current = null
+        setRecording(false)
+        setTranscriptionStatus('Não foi possível gravar o áudio. Verifique o microfone e tente novamente.')
+      }
+      recorder.onstop = () => {
+        const mimeType = recorder.mimeType || recordingChunksRef.current[0]?.type || 'audio/webm'
+        const extension = mimeType.includes('mp4') ? 'mp4' : 'webm'
+        const recordingFile = new File(
+          recordingChunksRef.current,
+          `gravacao-microfone.${extension}`,
+          { type: mimeType }
+        )
+        mediaStreamRef.current?.getTracks().forEach(track => track.stop())
+        mediaStreamRef.current = null
+        mediaRecorderRef.current = null
+        setRecording(false)
+        if (recordingFile.size === 0) {
+          setTranscriptionStatus('Nenhum áudio foi capturado. Grave novamente e fale próximo ao microfone.')
+          return
+        }
+        if (recordingFile.size > 25 * 1024 * 1024) {
+          setTranscriptionStatus('A gravação excede o limite de 25 MB. Faça uma gravação mais curta.')
+          return
+        }
+        setAudioFile(recordingFile)
+        setTranscriptionStatus('Gravação concluída. Envie-a para transcrição.')
+      }
+      recorder.start()
+      setRecording(true)
+    } catch (error) {
+      stream?.getTracks().forEach(track => track.stop())
+      mediaStreamRef.current = null
+      mediaRecorderRef.current = null
+      const message = error instanceof DOMException && error.name === 'NotAllowedError'
+        ? 'Acesso ao microfone negado. Permita o uso do microfone nas configurações do navegador.'
+        : error instanceof Error ? error.message : 'Não foi possível acessar o microfone.'
+      setTranscriptionStatus(message)
+    }
+  }
+
+  function stopAudioRecording() {
+    const recorder = mediaRecorderRef.current
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stop()
+      setTranscriptionStatus('Finalizando a gravação…')
+    }
+  }
+
   return <div className="app">
     <header className="topbar">
       <div className="brand"><div className="brand-mark">T</div><div><strong>Teleprompter</strong><span>Console do operador</span></div></div>
@@ -527,7 +1271,39 @@ function App() {
           </div>
           <div className="prompter-footer"><span>Linha {String(pageIndex + 4).padStart(2, '0')} de {String(totalPages * 3).padStart(2, '0')}</span><div className="progress"><span style={{width: `${progressPercent}%`}} /></div><span>00:24 / 02:30</span><button className="secondary small" onClick={() => setShowExpanded(true)}>↗ Ampliar</button></div>
         </section>
-        <aside className="panel voice-panel"><h3>Operação manual</h3><p className="muted">A rolagem e a navegação são controladas pelo operador ou pelo apresentador.</p><div className="notice">Áudio e reconhecimento de fala ainda não estão implementados.<p>Se a automação futura falhar, os controles de pausa, retomada, rolagem e navegação continuam disponíveis.</p></div><button className="secondary full" onClick={() => setTab('Editor de roteiro')}>Abrir editor</button></aside>
+        <aside className="panel voice-panel">
+          <h3>Transcrição de áudio</h3>
+          <p className="muted">Compara os trechos reconhecidos ao roteiro e sinaliza possíveis omissões, repetições, retomadas e improvisos.</p>
+          <div className="audio-record-controls">
+            <button className="primary full" disabled={liveTranscribing || liveFinalizing} onClick={() => void startLiveTranscription()}>{liveTranscribing ? 'Microfone acompanhando o roteiro' : liveFinalizing ? 'Finalizando transcrição…' : 'Iniciar acompanhamento ao vivo'}</button>
+            <button className="secondary full" disabled={!liveTranscribing} onClick={stopLiveTranscription}>Parar acompanhamento</button>
+          </div>
+          {liveTranscriptionStatus && <p className="transcription-status" role="status" aria-live="polite">{liveTranscriptionStatus}</p>}
+          {liveTranscript && <div className="live-transcript-preview">{liveTranscript}</div>}
+          <div className="audio-record-controls">
+            <button className="primary full" disabled={recording || transcribing || liveTranscribing} onClick={() => void startAudioRecording()}>{recording ? 'Gravando pelo microfone…' : 'Gravar para transcrever depois'}</button>
+            <button className="secondary full" disabled={!recording || transcribing} onClick={stopAudioRecording}>Encerrar gravação</button>
+          </div>
+          <label className="audio-upload">Arquivo de áudio<input type="file" accept=".mp3,.mp4,.mpeg,.mpga,.m4a,.wav,.webm" disabled={recording || transcribing || liveTranscribing} onChange={event => {
+            const selectedFile = event.target.files?.[0] ?? null
+            if (selectedFile && selectedFile.size > 25 * 1024 * 1024) {
+              setAudioFile(null)
+              setTranscriptionStatus('O arquivo de áudio excede o limite de 25 MB.')
+              event.target.value = ''
+              return
+            }
+            setAudioFile(selectedFile)
+            setTranscriptionStatus('')
+          }} /></label>
+          <p className="tiny muted">MP3, MP4, MPEG, MPGA, M4A, WAV ou WEBM · máximo 25 MB</p>
+          <button className="primary full" disabled={!audioFile || recording || transcribing || liveTranscribing} onClick={() => void transcribeAudio()}>{transcribing ? 'Transcrevendo…' : 'Enviar áudio e transcrever'}</button>
+          {transcriptionStatus && <p className="transcription-status" role="status" aria-live="polite">{transcriptionStatus}</p>}
+          {audioTranscript && <div className="audio-transcript">
+            <label>Texto transcrito<textarea value={audioTranscript} onChange={event => setAudioTranscript(event.target.value)} rows={6} /></label>
+            <button className="secondary full" onClick={() => updateCurrentPage({ text: audioTranscript, bodyHtml: undefined })}>Usar no texto da página atual</button>
+          </div>}
+          <button className="secondary full" onClick={() => setTab('Editor de roteiro')}>Abrir editor</button>
+        </aside>
       </div>
       <section className="panel editorial-panel">
         <div className="panel-heading"><div><p className="eyebrow">IDENTIFICAÇÃO EDITORIAL</p><h3>Classificação da matéria selecionada</h3></div></div>
@@ -554,13 +1330,13 @@ function App() {
 
     {tab === 'Leitura ampliada' && <main className="page-wrap expanded-wrap">
       <div className="page-title"><div><p className="eyebrow">MODO DO APRESENTADOR</p><h1>Leitura ampliada</h1><p>Modo de manipulador · Controles essenciais sempre visíveis.</p></div><span className="pill green">● Demonstração</span></div>
-      <div className="expanded-grid"><section className="panel expanded-script"><div className="prompter-head"><div><span className="pill green">● No ar · {story.code}</span><span className="pill editorial-category">{story.category} · Tom {story.tone}</span><strong>{story.headline}</strong></div><span className="page-count">Página {pageIndex + 1} de {story.pages.length}</span></div><div className="expanded-reading"><span className="script-label">PONTO DE LEITURA · FONTE {fontSize} PX</span>{story.alertLevel && story.alertLevel !== 'none' && <div className={`editorial-alert compact ${story.alertLevel}`}><strong>{story.alertLevel === 'critical' ? 'ALERTA EDITORIAL IMPORTANTE' : 'ATENÇÃO EDITORIAL'}</strong><p>{story.guidance}</p></div>}<div className="retranque" style={{fontSize:`${fontSize}px`}}>{page.title}</div><div style={{fontSize:`${fontSize}px`}}><ScriptText className="script-content" html={page.bodyHtml} text={page.text} /></div>{page.secondary && <div style={{fontSize:`${fontSize}px`}}><ScriptText className="script-content" html={page.secondaryHtml} text={page.secondary} /></div>}</div><div className="expanded-bottom"><span>À SEGUIR</span>{nextStory ? <><strong>{nextStory.headline}</strong><span>{nextStory.category} · {nextStory.tone}</span></> : <strong>Fim do espelho</strong>}<span>{globalPage}/{totalPages}</span></div></section><aside className="panel expanded-monitor"><div className="notice">Operação manual<p>Roteiro e controles disponíveis nesta sessão. O avanço automático por reconhecimento de voz ainda não faz parte desta versão.</p></div><button className="secondary full expanded-exit" onClick={() => setTab('Apresentador')}>Voltar à leitura</button></aside></div>
+      <div className="expanded-grid"><section className="panel expanded-script"><div className="prompter-head"><div><span className="pill green">● No ar · {story.code}</span><span className="pill editorial-category">{story.category} · Tom {story.tone}</span><strong>{story.headline}</strong></div><span className="page-count">Página {pageIndex + 1} de {story.pages.length}</span></div><div className="expanded-reading"><span className="script-label">PONTO DE LEITURA · FONTE {fontSize} PX</span>{story.alertLevel && story.alertLevel !== 'none' && <div className={`editorial-alert compact ${story.alertLevel}`}><strong>{story.alertLevel === 'critical' ? 'ALERTA EDITORIAL IMPORTANTE' : 'ATENÇÃO EDITORIAL'}</strong><p>{story.guidance}</p></div>}<div className="retranque" style={{fontSize:`${fontSize}px`}}>{page.title}</div><div style={{fontSize:`${fontSize}px`}}><ScriptText className="script-content" html={page.bodyHtml} text={page.text} /></div>{page.secondary && <div style={{fontSize:`${fontSize}px`}}><ScriptText className="script-content" html={page.secondaryHtml} text={page.secondary} /></div>}</div><div className="expanded-bottom"><span>À SEGUIR</span>{nextStory ? <><strong>{nextStory.headline}</strong><span>{nextStory.category} · {nextStory.tone}</span></> : <strong>Fim do espelho</strong>}<span>{globalPage}/{totalPages}</span></div></section><aside className="panel expanded-monitor"><div className="notice">Acompanhamento pela fala<p>Use o modo Teleprompter para acompanhar o ponto de leitura enquanto a fala coincide com o roteiro; não muda de página automaticamente.</p></div><button className="secondary full expanded-exit" onClick={() => setTab('Apresentador')}>Voltar à leitura</button></aside></div>
     </main>}
 
     {tab === 'Apresentador' && <main className="presenter-mode" style={{ backgroundColor: preferences.highContrast ? '#000000' : preferences.backgroundColor, color: preferences.highContrast ? '#ffffff' : preferences.textColor, fontFamily: preferences.fontFamily }}>
       <header className="presenter-header">
         <div className="brand"><div className="brand-mark">T</div><div><strong>Teleprompter</strong><span>Modo do apresentador</span></div></div>
-        <div className="presenter-status"><span className="pill green">● {operatorOverride ? 'Controle manual' : 'Leitura local · sem IA'}</span><span>{story.code} · {story.headline}</span></div>
+        <div className="presenter-status"><span className="pill green">● {liveTranscribing ? 'Acompanhamento por voz' : operatorOverride ? 'Controle manual' : 'Leitura local'}</span><span>{story.code} · {story.headline}</span></div>
         <div className="presenter-header-actions"><label className="presenter-story-picker">Matéria<select aria-label="Selecionar matéria do roteiro" value={selectedStory} onChange={e => chooseStory(Number(e.target.value))}>{editorialStories.map((item, index) => <option key={item.id} value={index}>{item.code} · {item.headline}</option>)}</select></label><button className="secondary" onClick={() => setShowReadingSettings(value => !value)} aria-expanded={showReadingSettings} aria-controls="reading-settings">{showReadingSettings ? 'Fechar personalização' : 'Personalizar leitura'}</button><button className="secondary manual-control-button" onClick={takeManualControl}>Assumir controle</button><button className="secondary" onClick={() => setTab('Operação ao vivo')}>Voltar ao operador</button></div>
       </header>
       {showReadingSettings && <section className="reading-settings" id="reading-settings" aria-labelledby="reading-settings-title">
@@ -579,6 +1355,15 @@ function App() {
       <section className="presenter-stage">
         <div className="presenter-meta"><span>{story.category.toUpperCase()} · TOM: {story.tone.toUpperCase()} · {page.label}</span><span>Página {pageIndex + 1} de {story.pages.length}</span></div>
         {story.alertLevel && story.alertLevel !== 'none' && <div className={`presenter-editorial-alert ${story.alertLevel}`} role="status"><strong>{story.category}: {story.tone}</strong><span>{story.guidance}</span></div>}
+        <section className={`presenter-speech-caption ${liveSpeechAssessment.kind}`} aria-label="Fala reconhecida ao vivo" aria-live="polite">
+          <div className="presenter-speech-caption-heading"><strong>FALA RECONHECIDA</strong><span>{liveTranscribing ? 'MICROFONE ATIVO' : 'MICROFONE DESATIVADO'}</span></div>
+          <p>{liveTranscript || 'O que você falar aparecerá aqui quando iniciar o microfone.'}</p>
+          <small>{liveSpeechAssessment.message}</small>
+          <div className="presenter-mic-meter" role="meter" aria-label="Nível de entrada do microfone" aria-valuemin={0} aria-valuemax={100} aria-valuenow={liveInputLevel}>
+            <span><i style={{ width: `${liveInputLevel}%` }} /></span>
+            <small>{liveTranscribing ? liveInputLevel >= 6 ? 'Som chegando pelo microfone' : 'Microfone ligado · fale para testar a entrada' : 'Entrada de áudio inativa'}</small>
+          </div>
+        </section>
         <div className={`presenter-reading ${preferences.highContrast ? 'high-contrast-reading' : ''}`} ref={presenterTextRef} onScroll={handlePresenterScroll} aria-label="Texto do teleprompter" tabIndex={0} style={{ backgroundColor: preferences.highContrast ? '#000000' : preferences.backgroundColor, color: preferences.highContrast ? '#ffffff' : preferences.textColor, fontFamily: preferences.fontFamily, borderColor: preferences.highContrast ? '#ffffff' : undefined }}>
           <div className="presenter-reading-inner">
             <div className="presenter-rundown-title" style={{ fontSize: `${fontSize}px` }}>{story.headline} · {page.title}</div>
@@ -595,6 +1380,13 @@ function App() {
         {nextStory ? <><strong>{nextStory.headline}</strong><span>{nextStory.category} · Tom {nextStory.tone}</span><p>{nextStory.pages[0]?.text}</p></> : <strong>Fim do espelho</strong>}
       </section>
       <section className="presenter-controls" aria-label="Controles do teleprompter">
+        <div className="presenter-live-follow">
+          <div><strong>Acompanhamento pela fala</strong><p className="tiny muted">A fala é comparada aos roteiros carregados; outro roteiro pode ser selecionado automaticamente quando identificado.</p></div>
+          {liveTranscribing
+            ? <button className="secondary" onClick={stopLiveTranscription}>Parar microfone</button>
+            : <button className="secondary" disabled={liveFinalizing} onClick={() => void startLiveTranscription()}>{liveFinalizing ? 'Finalizando transcrição…' : 'Iniciar pelo microfone'}</button>}
+          {liveTranscriptionStatus && <p className="transcription-status" role="status" aria-live="polite">{liveTranscriptionStatus}</p>}
+        </div>
         <div className="presenter-transport">
           <button className="secondary" onClick={previousPage}>← Anterior</button>
           <div className="manual-scroll-controls"><button className="secondary" onClick={() => moveReadingPoint(-220)} aria-label="Rolar o texto para cima">↑ Texto</button><button className="secondary" onClick={() => moveReadingPoint(220)} aria-label="Rolar o texto para baixo">↓ Texto</button></div>
@@ -605,7 +1397,7 @@ function App() {
         <div className="presenter-adjustment font-adjustment"><label>Tamanho do texto <strong>{fontSize}px</strong></label><div className="font-buttons"><button className="secondary" onClick={() => setFontSize(Math.max(24, fontSize - 2))} aria-label="Diminuir tamanho do texto">A−</button><button className="secondary" onClick={() => setFontSize(Math.min(60, fontSize + 2))} aria-label="Aumentar tamanho do texto">A+</button></div></div>
       </section>
       {paused && <div className="presenter-paused" role="status">Leitura pausada. O texto permanece nesta página até a retomada.</div>}
-      <p className="presenter-hint">Leitura e navegação funcionam localmente, sem IA ou conexão externa. Atalhos: Espaço pausa/retoma · ← página anterior · → próxima página · +/− tamanho do texto · Esc fecha a personalização.</p>
+      <p className="presenter-hint">A posição pode acompanhar a fala pelo microfone ou ser controlada manualmente. Atalhos: Espaço pausa/retoma · ← página anterior · → próxima página · +/− tamanho do texto · Esc fecha a personalização.</p>
     </main>}
 
     {tab !== 'Apresentador' && <footer className="app-footer"><span>Controles manuais disponíveis · sincronização da sessão em tempo real</span><span>Operador: Mariana Costa · Estação OP-02</span></footer>}

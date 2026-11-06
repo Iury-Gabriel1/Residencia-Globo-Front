@@ -29,6 +29,20 @@
 .presenter-stage{width:min(1100px,100%);margin:28px auto 18px;display:flex;flex-direction:column;flex:1;min-height:360px}
 .presenter-meta,.presenter-progress-label{display:flex;align-items:center;justify-content:space-between;gap:14px;color:#8491ad;font-size:10px;letter-spacing:.04em}
 .presenter-meta span:first-child{color:#9294ff;font-weight:700}
+.presenter-speech-caption{margin-top:12px;padding:12px 15px;border:1px solid #29334b;border-left:4px solid #727d95;border-radius:6px;background:#0e1423}
+.presenter-speech-caption.match{border-left-color:#42c99a}
+.presenter-speech-caption.omission{border-left-color:#ee766b}
+.presenter-speech-caption.repetition{border-left-color:#bd8df5}
+.presenter-speech-caption.resumption{border-left-color:#72a9f5}
+.presenter-speech-caption.improviso{border-left-color:#efb94e}
+.presenter-speech-caption-heading{display:flex;justify-content:space-between;gap:12px;color:#aab5cc;font-size:9px;letter-spacing:.08em}
+.presenter-speech-caption-heading span{color:#8491ad}
+.presenter-speech-caption p{max-height:92px;overflow:auto;margin:8px 0;color:#f2f4fb;font-size:14px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.presenter-speech-caption small{display:block;color:#aab5cc;font-size:10px;line-height:1.4}
+.presenter-mic-meter{display:grid;grid-template-columns:minmax(60px,180px) minmax(0,1fr);align-items:center;gap:10px;margin-top:8px}
+.presenter-mic-meter>span{height:5px;overflow:hidden;border-radius:4px;background:#29334b}
+.presenter-mic-meter i{display:block;height:100%;border-radius:4px;background:#42c99a;transition:width .15s}
+.presenter-mic-meter small{color:#8491ad;font-size:9px}
 .presenter-reading{flex:1;overflow-y:auto;min-height:280px;max-height:calc(100vh - 300px);margin:14px 0 16px;background:#0d1322;border:1px solid #252e45;border-radius:8px;scrollbar-color:#454e70 #0d1322;scrollbar-width:thin}
 .presenter-reading-inner{max-width:920px;margin:0 auto;padding:clamp(24px,5vw,64px) clamp(22px,5vw,66px) 70px}
 .presenter-reading h1{font-size:clamp(15px,1.5vw,19px);font-weight:500;color:#8e9ab7;margin:0 0 28px}
@@ -179,6 +193,20 @@
 .voice-panel[open]>summary::after{content:'−'}
 .voice-title{font-size:14px;font-weight:650;color:#e8ecf7}
 .voice-panel .pill{justify-self:start}
+.audio-record-controls{display:grid;gap:7px;margin:12px 0}
+.live-transcript-preview{max-height:150px;overflow:auto;margin:8px 0;padding:8px;border:1px solid #29334b;border-radius:5px;background:#0a101d;color:#d8deed;font-size:10px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.presenter-live-follow{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px 12px;width:100%;padding:10px 12px;border:1px solid #29334b;border-radius:6px;background:#0e1423}
+.presenter-live-follow strong{font-size:10px}
+.presenter-live-follow .tiny{margin:4px 0 0}
+.presenter-live-follow>.transcription-status,.presenter-live-follow>.live-transcript-preview{grid-column:1/-1;margin:0}
+.presenter-controls .presenter-live-follow{grid-column:1/-1}
+.audio-upload,.audio-transcript label{display:grid;gap:6px;color:#c3cbe0;font-size:10px;margin:12px 0}
+.audio-upload input{width:100%;min-width:0;color:#aab5cc;font-size:9px}
+.voice-panel>.tiny{margin:8px 0}
+.voice-panel>.primary{margin:4px 0}
+.transcription-status{font-size:10px;line-height:1.5;color:#aeb9d0}
+.audio-transcript{display:grid;gap:8px;margin:12px 0}
+.audio-transcript textarea{width:100%;resize:vertical;min-height:110px;padding:8px;border:1px solid #2a344c;border-radius:5px;background:#080d18;color:#f3f5fb;font-size:10px;line-height:1.5}
 .voice-summary-name{grid-column:1;color:#aeb9d0;font-size:11px}
 .voice-details{padding:0 14px 14px}
 .voice-details .waveform{margin:6px 0 10px}
